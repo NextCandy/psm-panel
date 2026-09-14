@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "psm-panel",
+  "main": "worker/src/index.ts",
+  "compatibility_date": "2026-09-01",
+  // The API and the subscription always reach the Worker; everything else is
+  // the panel's static pages.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/sub/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "psm-panel",
+      // `wrangler d1 create psm-panel` prints the id of your database
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": { "enabled": true }
+  // Secrets (never in this file): TOKEN_KEY, ACCESS_CLIENT_ID, ACCESS_CLIENT_SECRET
+}
