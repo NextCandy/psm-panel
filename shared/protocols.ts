@@ -184,7 +184,7 @@ export const PROTOCOLS: Protocol[] = [
       id: 'snell', label: 'Snell', psm: 'snell', engines: ['standalone', ...SB_MH], defaultEngine: 'standalone',
       fields: [
         { key: 'version', label: 'Snell 版本', type: 'select', default: '5', options: [
-          { value: '4', label: 'v4（mihomo）' }, { value: '5', label: 'v5' }, { value: '6', label: 'v6（sing-box）' }] },
+          { value: '4', label: 'v4（独立安装、mihomo）' }, { value: '5', label: 'v5' }, { value: '6', label: 'v6（独立安装、sing-box；上游仍是测试版）' }] },
         { key: 'psk', label: 'PSK', type: 'password', placeholder: '留空自动生成' },
       ],
     }],
@@ -200,7 +200,17 @@ export const PROTOCOLS: Protocol[] = [
 
 /** Snell versions each engine can run. */
 export const SNELL_VERSIONS: Partial<Record<Engine, string[]>> = {
-  standalone: ['5'], 'sing-box': ['5', '6'], mihomo: ['4', '5'],
+  standalone: ['4', '5', '6'], 'sing-box': ['5', '6'], mihomo: ['4', '5'],
+}
+
+/**
+ * The name PSM's traffic metering knows a node by: its own name, or snell /
+ * ss2022 for the standalone servers (one of each per server). Those two are
+ * therefore not allowed as node names.
+ */
+export const RESERVED_NAMES = ['snell', 'ss2022']
+export function trafficTag(n: { engine: string; psm_protocol: string; name: string }): string {
+  return n.engine === 'standalone' ? n.psm_protocol : n.name
 }
 
 export function findVariant(protocolId: string, variantId: string): Variant | undefined {
@@ -244,6 +254,7 @@ export function validateNode(n: NodeInput):
   if (!v) return { ok: false, errors: ['未知的协议'] }
   if (!v.engines.includes(n.engine)) errors.push(`${v.label} 不能用 ${ENGINE_LABELS[n.engine] ?? n.engine} 运行`)
   if (!NAME_RE.test(n.name ?? '')) errors.push('节点名称：1-48 位字母、数字、. _ -，以字母或数字开头')
+  else if (RESERVED_NAMES.includes(n.name.toLowerCase())) errors.push(`节点名称：${n.name} 是保留名称（独立安装的流量统计用它），请换一个`)
   if (!HOST_RE.test(n.address ?? '')) errors.push('节点地址：填写域名或 IP')
   const portOk = (p: unknown) => Number.isInteger(p) && (p as number) >= 1 && (p as number) <= 65535
   if (!portOk(n.port)) errors.push('服务端口：1-65535')

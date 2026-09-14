@@ -5,12 +5,18 @@ import Login from './components/Login.vue'
 import Dashboard from './views/Dashboard.vue'
 import Nodes from './views/Nodes.vue'
 import Servers from './views/Servers.vue'
+import Traffic from './views/Traffic.vue'
+import Subscriptions from './views/Subscriptions.vue'
+import Settings from './views/Settings.vue'
 
 // A hash route per page: #/nodes, #/servers …
 const pages = [
   { id: 'dashboard', label: '仪表盘', icon: '▦', component: Dashboard },
   { id: 'nodes', label: '节点管理', icon: '◉', component: Nodes },
   { id: 'servers', label: '服务器', icon: '▤', component: Servers },
+  { id: 'traffic', label: '流量', icon: '⇅', component: Traffic },
+  { id: 'subscriptions', label: '订阅', icon: '⎘', component: Subscriptions },
+  { id: 'settings', label: '系统设置', icon: '⚙', component: Settings },
 ]
 const current = ref('nodes')
 const readHash = () => {
@@ -48,16 +54,16 @@ onMounted(() => {
   <Login v-if="auth === 'signed-out'" :configured="configured" @done="auth = 'signed-in'" />
   <div v-else-if="auth === 'signed-in'" class="layout">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-logo">P</span> PSM Panel</div>
+      <div class="brand"><img class="brand-logo" src="/logo.svg" alt="" data-test="logo"> PSM Panel</div>
       <nav class="nav">
-        <a v-for="p in pages" :key="p.id" :href="`#/${p.id}`" :class="{ active: p.id === current }">
-          <span>{{ p.icon }}</span>{{ p.label }}
+        <a v-for="p in pages" :key="p.id" :href="`#/${p.id}`" :class="{ active: p.id === current }" :data-test="`nav-${p.id}`">
+          <span class="nav-icon">{{ p.icon }}</span>{{ p.label }}
         </a>
       </nav>
       <button class="btn ghost small" style="margin: 14px 4px 0" data-test="logout" @click="logout">退出登录</button>
     </aside>
     <main class="main">
-      <component :is="page.component" />
+      <component :is="page.component" :key="page.id" />
     </main>
   </div>
 </template>

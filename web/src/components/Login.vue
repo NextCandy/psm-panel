@@ -27,7 +27,7 @@ async function submit() {
 <template>
   <div class="login">
     <form class="card login-card" @submit.prevent="submit">
-      <div class="brand"><span class="brand-logo">P</span> PSM Panel</div>
+      <div class="brand"><img class="brand-logo" src="/logo.svg" alt=""> PSM Panel</div>
       <template v-if="configured">
         <div class="field">
           <label for="password">管理员密码</label>

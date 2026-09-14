@@ -1,14 +1,18 @@
+<p align="center"><img src="web/public/logo.svg" width="72" alt="PSM Panel"></p>
+
 # PSM Panel
 
-[PSM](https://github.com/jinqians/proxy-stack) 的网页管理面板（参考 Xboard）：在一个网页里管理多台 VPS 的节点、安装、状态和流量，并把多台 VPS 的节点汇总成一个订阅。
+[PSM](https://github.com/jinqians/proxy-stack) 的网页管理面板（参考 Xboard）：在一个网页里管理多台 VPS 的节点、安装、状态和流量，并把所有节点汇总成一个订阅。
 
-- 后端和页面运行在 Cloudflare Workers 上（数据存 D1），只有一个域名，免费额度就够用。
-- 后台用管理员密码登录。
-- 每台 VPS 上的 psm-agent 主动用 HTTPS 连面板（空闲时 30 秒一次，有任务时 3 秒一次），领取任务、回报结果；VPS 不监听任何端口，也不需要子域名或 Tunnel。
+- **一键部署到 Cloudflare**：后端和页面运行在 Cloudflare Workers 上，数据存 D1，免费额度就够用；只需要填一个管理员密码。
+- **VPS 不开放任何端口**：每台 VPS 上的 psm-agent 主动用 HTTPS 连面板，领取任务、回报结果；不需要子域名、Tunnel 或防火墙规则。
+- **没装过 PSM 也能接入**：面板给出的一条命令会先装好 PSM，再接入面板；节点用到哪个内核（Xray / sing-box / mihomo）就自动装哪个。
+- **节点**：PSM 支持的全部协议，Snell 和 SS2022 可以用独立的 snell-server（v4 / v5 / v6）和 ss-rust 运行；新建、修改、删除都在面板里完成。
+- **流量**：每个节点本月用量、每日图表、流量上限（超额自动暂停，到重置日或手动重置后恢复）。
+- **订阅**：一个地址汇总所有服务器的节点，可按标签筛选；通用链接、Clash / mihomo、sing-box、Surge 格式，按客户端自动识别。
+- **诊断和记录**：一键收集服务器的 PSM 版本、内核、`psm doctor` 结果；所有操作都有记录。
 
-**开发中**：后台页面、新建节点、psm-agent 任务队列、一键部署已完成；VPS 端的一键接入命令（`--panel … --join …`）即将发布。设计和计划见 [docs/DESIGN.md](docs/DESIGN.md)。
-
-文档：https://psm-docs.pages.dev
+完整的部署和使用文档：**https://jinqians.github.io/psm-panel-docs/**
 
 ## 一键部署
 
@@ -16,46 +20,31 @@
 
 1. 点上面的按钮，登录 Cloudflare（没有账号就免费注册一个）。
 2. 按提示连接 GitHub：Cloudflare 会把这个仓库复制一份到你的 GitHub 账号（相当于 fork），以后往那个仓库推送会自动重新部署。
-3. 表单里只需要填 **ADMIN_PASSWORD**（后台登录密码，至少 8 位），其余保持默认，点"部署"。
-
-   D1 数据库由 Cloudflare 自动创建，数据表由面板第一次运行时自己建好，不需要执行任何命令，也不需要 API Token。
-
+3. 表单里只需要填 **ADMIN_PASSWORD**（后台登录密码，至少 8 位），其余保持默认，点"部署"。D1 数据库自动创建，数据表由面板第一次运行时自己建好，不需要执行任何命令，也不需要 API Token。
 4. 部署完成后打开 `https://psm-panel.<你的子域>.workers.dev`，用刚才的密码登录。
 
-**已经 fork 了这个仓库**：在 Cloudflare 控制台打开 [Workers 和 Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages) → 创建 → 导入仓库，选中你的 fork，部署后在这个 Worker 的"设置 → 变量和机密"里添加机密 `ADMIN_PASSWORD`。
+**已经 fork 了这个仓库**：在 Cloudflare 控制台打开 [Workers 和 Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages) → 创建 → 导入仓库，选中你的 fork；部署后在这个 Worker 的"设置 → 变量和机密"里添加机密 `ADMIN_PASSWORD`。
 
-**用自己的域名**：部署后在 Worker 的"设置 → 域和路由"里添加自定义域。
+**用自己的域名**：在 Worker 的"设置 → 域和路由"添加自定义域，再在面板"系统设置"里把面板地址改成它。
 
-**改密码**：在"设置 → 变量和机密"里修改 `ADMIN_PASSWORD`，所有已登录的会话随即失效。
+## 接入服务器
 
-**更强的保护（可选）**：可以在面板前面再加 Cloudflare Access，只需放行 `/api/agent/*` 和 `/sub/*`（VPS 和订阅客户端不会登录）。
-
-## 用命令行部署（可选）
-
-不用按钮、想用 wrangler 或自己的 CI 部署时，需要 Cloudflare 的 **API Token** 和 **Account ID**：
-
-1. **API Token**：[点这里打开已填好权限的创建页面](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=psm-panel)，核对下表，把"账户"和"区域"限定为你自己的账户和面板所用的域名，然后创建。
-
-   | 权限 | 范围 | 用途 |
-   | --- | --- | --- |
-   | Workers Scripts：编辑 | 账户 | 部署 Worker |
-   | D1：编辑 | 账户 | 创建数据库 |
-   | 账户设置：读取 | 账户 | wrangler 识别账户 |
-   | Workers Routes：编辑 | 区域 | 把 Worker 绑到自己的域名 |
-   | DNS：编辑 | 区域 | 自定义域的 DNS 记录 |
-   | 区域：读取 | 区域 | 查找域名 |
-
-   链接打不开或权限不全时，在 [API Tokens](https://dash.cloudflare.com/profile/api-tokens) 选"创建自定义令牌"，按上表手动添加。
-
-2. **Account ID**：打开 [Workers 和 Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages)，在右侧"账户详细信息"里复制；或在控制台按 ⌘K / Ctrl+K 搜索"Copy account ID"。
-
-然后：
+在面板"服务器"页添加服务器（或新建节点时选"＋ 新服务器"），复制给出的命令，在 VPS 上以 root 执行：
 
 ```bash
-npm install
-CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… npm run deploy
-npx wrangler secret put ADMIN_PASSWORD
+bash <(curl -fsSL https://psm.jinqians.com) --panel https://<你的面板地址> --join <一次性令牌>
 ```
+
+- 没装过 PSM：先不交互地装好 PSM，再接入。
+- 装过 PSM：更新 PSM 后接入；已有的节点和命令行用法都不受影响。
+
+令牌 24 小时内有效、只能用一次。接入后服务器显示"在线"，面板上的节点几秒内在服务器上建好。
+
+## 安全
+
+- 管理员密码只存在 Worker 机密里；登录会话是签名的 HttpOnly Cookie，同一地址 15 分钟内失败 10 次后暂停登录。
+- 节点密码、客户端链接、下发的任务、订阅令牌在 D1 里都加密保存；agent 令牌和加入令牌只存哈希。
+- psm-agent 只执行白名单校验过的 `psm` 命令，参数以数组传递，从不经过 shell。
 
 ## 许可
 

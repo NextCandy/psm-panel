@@ -21,8 +21,9 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
 
 export type Server = {
   id: number; name: string; status: 'pending' | 'online' | 'offline'
-  hostname: string | null; agent_version: string | null
-  note: string; last_seen: string | null; created_at: string; node_count: number
+  hostname: string | null; agent_version: string | null; psm_version: string | null
+  note: string; last_seen: string | null; created_at: string; status_at: string | null
+  node_count: number; traffic_used: number
 }
 
 export type NodeStatus = 'waiting' | 'queued' | 'applied' | 'failed' | 'deleting'
@@ -32,4 +33,26 @@ export type PanelNode = {
   name: string; address: string; port: number; public_port: number | null; traffic_limit_gb: number
   labels: string[]; params: Record<string, unknown>; status: NodeStatus
   last_error: string | null; created_at: string; has_link: boolean
+  traffic_used: number; traffic_paused: boolean; traffic_at: string | null; reset_day: number
+}
+
+export type Subscription = {
+  id: number; name: string; labels: string[]; url: string; last_used: string | null; created_at: string
+}
+
+export const GB = 1024 ** 3
+
+/** 1536 → "1.5 KB" */
+export function formatBytes(n: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let v = Math.max(0, n || 0), i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${i ? v.toFixed(v < 10 ? 2 : 1) : v} ${units[i]}`
+}
+
+/** "2026-09-15 08:00:00" (UTC, from D1) → local time */
+export function localTime(t: string | null): string {
+  if (!t) return '—'
+  const d = new Date(t.replace(' ', 'T') + 'Z')
+  return Number.isNaN(d.getTime()) ? t : d.toLocaleString('zh-CN', { hour12: false })
 }

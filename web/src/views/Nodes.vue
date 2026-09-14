@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { PROTOCOLS, ENGINE_LABELS, findVariant, type Engine } from '@shared/protocols'
-import { api, type PanelNode, type Server } from '../api'
+import { api, formatBytes, type PanelNode, type Server } from '../api'
 import NodeDialog from '../components/NodeDialog.vue'
 
 const nodes = ref<PanelNode[]>([])
 const servers = ref<Server[]>([])
 const dialog = ref(false)
+const editing = ref<PanelNode | null>(null)
 const message = ref('')
 
 async function load() {
@@ -44,23 +45,35 @@ async function remove(n: PanelNode) {
     message.value = (e as Error).message
   }
 }
+function openNew() {
+  editing.value = null
+  dialog.value = true
+}
+function openEdit(n: PanelNode) {
+  editing.value = n
+  dialog.value = true
+}
 </script>
 
 <template>
   <div class="page-head">
-    <div><h1>节点管理</h1><p>管理所有节点，包括添加、删除、查看链接等操作。</p></div>
-    <button class="btn primary" data-test="new-node" @click="dialog = true">＋ 新建节点</button>
+    <div><h1>节点管理</h1><p>管理所有节点，包括添加、修改、删除、查看链接等操作。</p></div>
+    <button class="btn primary" data-test="new-node" @click="openNew">＋ 新建节点</button>
   </div>
   <div v-if="message" class="notice warn" data-test="message">{{ message }}</div>
   <div class="card table-wrap">
     <table>
       <thead>
-        <tr><th>ID</th><th>状态</th><th>节点名称</th><th>协议</th><th>运行方式</th><th>服务器</th><th>地址</th><th>流量上限</th><th>标签</th><th>操作</th></tr>
+        <tr><th>ID</th><th>状态</th><th>节点名称</th><th>协议</th><th>运行方式</th><th>服务器</th><th>地址</th><th>本月流量</th><th>标签</th><th>操作</th></tr>
       </thead>
       <tbody>
         <tr v-for="n in nodes" :key="n.id" :data-test="`node-${n.name}`" :data-status="n.status">
           <td>{{ n.id }}</td>
-          <td><span class="status" :class="n.status" :title="n.last_error ?? ''"><span class="dot" />{{ statusText[n.status] }}</span></td>
+          <td>
+            <span class="status" :class="n.status" :title="n.last_error ?? ''"><span class="dot" />{{ statusText[n.status] }}</span>
+            <span v-if="n.traffic_paused" class="badge warn" title="超出流量上限，已暂停">超额暂停</span>
+            <span v-if="n.last_error && n.status === 'applied'" class="badge err" :title="n.last_error">!</span>
+          </td>
           <td>{{ n.name }}</td>
           <td>
             <span class="proto-tag"><span class="dot" :style="{ background: proto(n.protocol)?.color }" />
@@ -70,10 +83,11 @@ async function remove(n: PanelNode) {
           <td>{{ ENGINE_LABELS[n.engine as Engine] ?? n.engine }}</td>
           <td>{{ serverName(n.server_id) }}</td>
           <td>{{ n.address }}:{{ n.public_port ?? n.port }}</td>
-          <td>{{ n.traffic_limit_gb ? `${n.traffic_limit_gb} GB` : '不限' }}</td>
+          <td>{{ formatBytes(n.traffic_used) }} / {{ n.traffic_limit_gb ? `${n.traffic_limit_gb} GB` : '不限' }}</td>
           <td><span v-for="l in n.labels" :key="l" class="label-chip">{{ l }}</span></td>
           <td>
             <button class="btn small ghost" :disabled="!n.has_link" @click="showLink(n)">链接</button>
+            <button class="btn small ghost" :disabled="n.status === 'queued' || n.status === 'deleting'" :data-test="`edit-${n.name}`" @click="openEdit(n)">编辑</button>
             <button class="btn small ghost danger" :disabled="n.status === 'deleting'" @click="remove(n)">删除</button>
           </td>
         </tr>
@@ -81,5 +95,5 @@ async function remove(n: PanelNode) {
     </table>
     <div v-if="!nodes.length" class="empty">还没有节点，点右上角"新建节点"。</div>
   </div>
-  <NodeDialog v-if="dialog" :servers="servers" @close="dialog = false; load()" @created="load" />
+  <NodeDialog v-if="dialog" :servers="servers" :node="editing" @close="dialog = false; load()" @created="load" />
 </template>
