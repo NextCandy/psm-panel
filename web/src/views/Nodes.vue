@@ -1,0 +1,85 @@
+<script setup lang="ts">
+import { onMounted, onUnmounted, ref } from 'vue'
+import { PROTOCOLS, ENGINE_LABELS, findVariant, type Engine } from '@shared/protocols'
+import { api, type PanelNode, type Server } from '../api'
+import NodeDialog from '../components/NodeDialog.vue'
+
+const nodes = ref<PanelNode[]>([])
+const servers = ref<Server[]>([])
+const dialog = ref(false)
+const message = ref('')
+
+async function load() {
+  ;[nodes.value, servers.value] = await Promise.all([api<PanelNode[]>('/api/nodes'), api<Server[]>('/api/servers')])
+}
+// While a change is on its way to a server, look again every few seconds.
+let timer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  load()
+  timer = setInterval(() => {
+    if (nodes.value.some((n) => n.status === 'queued' || n.status === 'deleting')) load()
+  }, 3000)
+})
+onUnmounted(() => clearInterval(timer))
+
+const proto = (id: string) => PROTOCOLS.find((p) => p.id === id)
+const serverName = (id: number) => servers.value.find((s) => s.id === id)?.name ?? '?'
+const statusText: Record<string, string> = { waiting: '待安装', queued: '下发中', applied: '运行中', failed: '失败', deleting: '删除中' }
+
+async function showLink(n: PanelNode) {
+  try {
+    const r = await api<{ content: string }>(`/api/nodes/${n.id}/link`)
+    await navigator.clipboard.writeText(r.content).catch(() => {})
+    message.value = `已复制 ${n.name} 的链接：${r.content}`
+  } catch (e) {
+    message.value = (e as Error).message
+  }
+}
+async function remove(n: PanelNode) {
+  if (!confirm(`删除节点 ${n.name}？服务器上的节点也会一起删除。`)) return
+  try {
+    await api(`/api/nodes/${n.id}`, { method: 'DELETE' })
+    await load()
+  } catch (e) {
+    message.value = (e as Error).message
+  }
+}
+</script>
+
+<template>
+  <div class="page-head">
+    <div><h1>节点管理</h1><p>管理所有节点，包括添加、删除、查看链接等操作。</p></div>
+    <button class="btn primary" data-test="new-node" @click="dialog = true">＋ 新建节点</button>
+  </div>
+  <div v-if="message" class="notice warn" data-test="message">{{ message }}</div>
+  <div class="card table-wrap">
+    <table>
+      <thead>
+        <tr><th>ID</th><th>状态</th><th>节点名称</th><th>协议</th><th>运行方式</th><th>服务器</th><th>地址</th><th>流量上限</th><th>标签</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="n in nodes" :key="n.id" :data-test="`node-${n.name}`" :data-status="n.status">
+          <td>{{ n.id }}</td>
+          <td><span class="status" :class="n.status" :title="n.last_error ?? ''"><span class="dot" />{{ statusText[n.status] }}</span></td>
+          <td>{{ n.name }}</td>
+          <td>
+            <span class="proto-tag"><span class="dot" :style="{ background: proto(n.protocol)?.color }" />
+              {{ proto(n.protocol)?.label }}<template v-if="(proto(n.protocol)?.variants.length ?? 0) > 1"> · {{ findVariant(n.protocol, n.variant)?.label }}</template>
+            </span>
+          </td>
+          <td>{{ ENGINE_LABELS[n.engine as Engine] ?? n.engine }}</td>
+          <td>{{ serverName(n.server_id) }}</td>
+          <td>{{ n.address }}:{{ n.public_port ?? n.port }}</td>
+          <td>{{ n.traffic_limit_gb ? `${n.traffic_limit_gb} GB` : '不限' }}</td>
+          <td><span v-for="l in n.labels" :key="l" class="label-chip">{{ l }}</span></td>
+          <td>
+            <button class="btn small ghost" :disabled="!n.has_link" @click="showLink(n)">链接</button>
+            <button class="btn small ghost danger" :disabled="n.status === 'deleting'" @click="remove(n)">删除</button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <div v-if="!nodes.length" class="empty">还没有节点，点右上角"新建节点"。</div>
+  </div>
+  <NodeDialog v-if="dialog" :servers="servers" @close="dialog = false; load()" @created="load" />
+</template>

@@ -4,18 +4,22 @@
   "type": "module",
   "license": "AGPL-3.0-only",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "build": "vite build --config web/vite.config.ts",
+    "dev": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "db:migrate:local": "wrangler d1 migrations apply psm-panel --local",
     "db:migrate": "wrangler d1 migrations apply psm-panel --remote"
   },
   "dependencies": {
-    "hono": "4.13.7"
+    "hono": "4.13.7",
+    "vue": "3.5.42"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260914.1",
+    "@vitejs/plugin-vue": "6.0.9",
     "typescript": "7.0.2",
+    "vite": "8.3.0",
     "wrangler": "4.131.2"
   }
 }
