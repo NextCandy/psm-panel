@@ -14,6 +14,8 @@ export type Env = {
   PANEL_URL?: string
   /** where bootstrap.sh is served */
   INSTALL_URL?: string
+  /** seconds between agent syncs when there is nothing to do (default 30) */
+  SYNC_INTERVAL?: string
 }
 
 type ServerRow = {
@@ -33,9 +35,17 @@ const app = new Hono<{ Bindings: Env }>()
 const fail = (code: string, message: string, extra: Record<string, unknown> = {}) => ({ error: { code, message, ...extra } })
 const SERVER_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/
 const JOIN_TTL_HOURS = 24
-const SYNC_INTERVAL = 10       // seconds between agent syncs
-const ONLINE_WINDOW = 60       // a server that synced within this many seconds is online
+const FAST_INTERVAL = 3        // seconds between syncs while a server has tasks under way
 const TASK_RETRY_MINUTES = 5   // a task claimed but not reported for this long is handed out again
+
+// Agents sync every SYNC_INTERVAL seconds when idle (30 by default; each sync
+// is one Worker request and one D1 write, so a longer interval leaves the free
+// quotas for more servers) and every FAST_INTERVAL seconds while tasks are
+// under way. A server is online while it synced within three intervals.
+function syncInterval(env: Env): number {
+  const n = Number(env.SYNC_INTERVAL)
+  return Number.isFinite(n) && n >= 5 && n <= 300 ? Math.round(n) : 30
+}
 
 app.onError((err, c) => {
   console.error(err)
@@ -73,8 +83,8 @@ async function newJoinToken(env: Env, serverId: number): Promise<string> {
   return token
 }
 
-const SERVER_STATUS_SQL = `CASE WHEN s.agent_token_hash IS NULL THEN 'pending'
-  WHEN s.last_seen >= datetime('now', '-${ONLINE_WINDOW} seconds') THEN 'online' ELSE 'offline' END`
+const serverStatusSQL = (env: Env) => `CASE WHEN s.agent_token_hash IS NULL THEN 'pending'
+  WHEN s.last_seen >= datetime('now', '-${syncInterval(env) * 3} seconds') THEN 'online' ELSE 'offline' END`
 
 async function getServer(env: Env, id: string | number): Promise<ServerRow | null> {
   if (!/^\d+$/.test(String(id))) return null
@@ -118,7 +128,7 @@ async function publicNode(env: Env, n: NodeRow) {
 // ── servers ──────────────────────────────────────────────────────────────────
 app.get('/api/servers', async (c) => {
   const { results } = await c.env.DB.prepare(
-    `SELECT s.id, s.name, ${SERVER_STATUS_SQL} AS status, s.hostname, s.agent_version, s.note, s.last_seen, s.created_at,
+    `SELECT s.id, s.name, ${serverStatusSQL(c.env)} AS status, s.hostname, s.agent_version, s.note, s.last_seen, s.created_at,
             (SELECT COUNT(*) FROM nodes n WHERE n.server_id = s.id) AS node_count
        FROM servers s ORDER BY s.id`).all()
   return c.json(results)
@@ -254,7 +264,7 @@ app.post('/api/agent/join', async (c) => {
     await enqueue(c.env, server.id, n.id, addTask(n, await nodeData(c.env, n)))
     await c.env.DB.prepare(`UPDATE nodes SET status = 'queued', last_error = NULL WHERE id = ?`).bind(n.id).run()
   }
-  return c.json({ agent_token: agentToken, server: { id: server.id, name: server.name }, interval: SYNC_INTERVAL })
+  return c.json({ agent_token: agentToken, server: { id: server.id, name: server.name }, interval: syncInterval(c.env) })
 })
 
 // Sync: the agent reports the results of its tasks and takes new ones.
@@ -296,7 +306,10 @@ app.post('/api/agent/sync', async (c) => {
     await c.env.DB.prepare(`UPDATE tasks SET status = 'running', claimed_at = datetime('now') WHERE id = ?`).bind(t.id).run()
     tasks.push({ id: t.id, ...JSON.parse(await decrypt(c.env.TOKEN_KEY, t.payload_enc)) })
   }
-  return c.json({ interval: SYNC_INTERVAL, tasks })
+  // more queued behind these, or results just came in: come back soon
+  const busy = tasks.length > 0 || (body.results?.length ?? 0) > 0 ||
+    !!(await c.env.DB.prepare(`SELECT 1 FROM tasks WHERE server_id = ? AND status = 'queued' LIMIT 1`).bind(server.id).first())
+  return c.json({ interval: busy ? FAST_INTERVAL : syncInterval(c.env), tasks })
 })
 
 app.all('/api/*', (c) => c.json(fail('not_found', 'no such endpoint'), 404))

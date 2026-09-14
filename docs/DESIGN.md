@@ -15,7 +15,7 @@ PSM Panel 是 [PSM](https://github.com/jinqians/proxy-stack) 的网页管理后�
 ```
 管理员浏览器 ──Access 登录──▶ psm.jqwebs.cc ◀── Cloudflare Worker + D1（后台 API、页面、任务队列、订阅）
                                    ▲
-       VPS hk1：psm-agent ─────────┤ 每 10 秒一次 HTTPS：上报状态、流量、任务结果；领取新任务
+       VPS hk1：psm-agent ─────────┤ 主动 HTTPS（空闲 30 秒一次）：上报状态、流量、任务结果；领取新任务
        VPS jp1：psm-agent ─────────┘
 客户端 ──▶ psm.jqwebs.cc/sub/<令牌>（汇总所有 VPS 的节点）
 ```
@@ -24,7 +24,7 @@ PSM Panel 是 [PSM](https://github.com/jinqians/proxy-stack) 的网页管理后�
 | --- | --- | --- |
 | 后台 API、任务队列、订阅 | psm-panel/`worker` | Cloudflare Workers，TypeScript + Hono，D1 |
 | 后台页面 | psm-panel/`web` | Vue 3 + Vite，Xboard 风格 |
-| psm-agent | proxy-stack/`api` | Go 静态二进制（amd64 / arm64），GitHub Release 发布，安装时校验 sha256 |
+| psm-agent | proxy-stack/`agent` | Go 静态二进制（amd64 / arm64），GitHub Release 发布，安装时校验 sha256 |
 | 一键安装 | proxy-stack：`bootstrap.sh --panel … --join …` | Bash |
 | 部署 | psm-panel/`.github/workflows` | push 到 main 后 `wrangler deploy` + D1 迁移 |
 
@@ -62,15 +62,17 @@ bash <(curl -fsSL https://psm.jinqians.com) --panel https://psm.jqwebs.cc --join
 
 ## 5. psm-agent 同步协议
 
-`POST /api/agent/sync`，`Authorization: Bearer <agent 令牌>`，每 10 秒一次（有任务在执行时立刻再同步一次）：
+`POST /api/agent/sync`，`Authorization: Bearer <agent 令牌>`。这是 VPS 主动发出的 HTTPS 请求，VPS 本身不监听任何端口；它用来领取任务、回报结果，同时充当心跳（面板据此判断在线 / 离线）。
+
+空闲时每 `SYNC_INTERVAL` 秒一次（默认 30 秒，可在 Worker 变量里改）；有任务在执行、刚回报结果或还有排队任务时，面板让它每 3 秒来一次，做完再回到空闲间隔。每次同步是一次 Worker 请求加一次 D1 写入，按 30 秒计一台服务器每天约 2900 次，Cloudflare 免费额度（每天 10 万次请求、10 万次写入）够三十多台服务器使用。在线判定窗口是三个空闲间隔。
 
 ```jsonc
 // 请求
 { "agent_version": "0.3.0", "psm_version": "…", "hostname": "…",
   "results": [ { "task_id": 12, "ok": true, "output": { … } } ],
   "traffic": [ { "core": "xray", "protocol": "reality", "tag": "hk", "up": 123, "down": 456 } ] }
-// 响应
-{ "interval": 10,
+// 响应（interval：下次同步前等待的秒数）
+{ "interval": 30,
   "tasks": [ { "id": 13, "kind": "node.add", "core": "sing-box", "protocol": "hysteria2", "data": { … } } ] }
 ```
 
@@ -120,6 +122,6 @@ agent 端再次校验每个任务：内核、协议、节点名（以字母或�
 
 ## 10. 已知取舍
 
-- 面板的改动在下一次同步（默认 10 秒内）才到 VPS，不是实时的；需要时可以加 Durable Objects 做实时推送。
+- 面板的改动在下一次同步（空闲时最多 30 秒）才到 VPS，不是实时的；需要时可以加 Durable Objects 做实时推送。
 - 依赖 Cloudflare Workers 和 D1；VPS 只需要能访问 `psm.jqwebs.cc`。
 - psm-agent 需要发布 amd64 / arm64 二进制。

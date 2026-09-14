@@ -31,7 +31,8 @@ docker run -d --name "$K" --network "$NET" --network-alias panel -v "$N:/app" -w
 chk "npm install" docker exec "$K" npm install --no-audit --no-fund
 chk "typecheck" docker exec "$K" npx tsc --noEmit
 chk "build the pages" docker exec "$K" npm run build
-docker exec "$K" sh -c "printf 'TOKEN_KEY=%s\nPANEL_URL=http://panel:8787\n' \$(head -c 32 /dev/urandom | base64) > .dev.vars"
+# SYNC_INTERVAL=10 keeps the test short (the default is 30)
+docker exec "$K" sh -c "printf 'TOKEN_KEY=%s\nPANEL_URL=http://panel:8787\nSYNC_INTERVAL=10\n' \$(head -c 32 /dev/urandom | base64) > .dev.vars"
 chk "D1 migrations" docker exec "$K" npx wrangler d1 migrations apply psm-panel --local
 docker exec -d "$K" sh -c 'npx wrangler dev --ip 0.0.0.0 --port 8787 > /tmp/wrangler.log 2>&1'
 
@@ -139,6 +140,23 @@ chk "psm-agent is running" docker exec "$V" pgrep -f 'psm-agent run'
 AT=$(docker exec "$V" jq -r .token /etc/psm/agent.json)
 chk "D1 holds no agent token, join token or node password in clear" bash -c "! docker exec $K grep -rqE '$AT|$JT|m1-pass-secret' /app/.wrangler/state"
 chk "the agent log carries no token" bash -c "! docker exec $V grep -q '$AT' /var/log/psm-agent.log"
+
+sec "sync interval: 3 s while there is work, SYNC_INTERVAL (10 here) when idle"
+# the agent is stopped so these syncs, made with its token, are the only ones
+agent_sync() { local b=${1-}; [[ -n $b ]] || b='{}'
+               docker exec "$V" curl -s -H "Authorization: Bearer $AT" -H 'Content-Type: application/json' -d "$b" $B/api/agent/sync; }
+docker exec "$V" pkill -f 'psm-agent run'
+for _ in 1 2 3 4 5; do docker exec "$V" pgrep -f 'psm-agent run' >/dev/null || break; sleep 1; done
+chk "idle → 10" jq -e '.interval == 10 and (.tasks | length) == 0' <<<"$(agent_sync)"
+node '"name":"m1-busy","protocol":"ss2022","variant":"ss2022","engine":"sing-box","port":31011,"params":{}' >/dev/null
+s=$(agent_sync)
+chk "a task handed out → 3" jq -e '.interval == 3 and (.tasks | length) == 1' <<<"$s"
+tid=$(jq '.tasks[0].id' <<<"$s")
+chk "its result reported → 3" jq -e '.interval == 3' <<<"$(agent_sync "{\"results\":[{\"task_id\":$tid,\"ok\":false,\"error\":\"m1 test\"}]}")"
+chk "nothing left → 10" jq -e '.interval == 10 and (.tasks | length) == 0' <<<"$(agent_sync)"
+id=$(api $B/api/nodes | jq '.[] | select(.name == "m1-busy") | .id')
+chk "the failed node deletes at once → 204" test "$(code -X DELETE $B/api/nodes/$id)" = 204
+docker exec -d "$V" bash -c 'psm-agent run >> /var/log/psm-agent.log 2>&1'
 
 sec "the page, driven in a browser (Playwright)"
 docker run -d --name "$U" --network "$NET" -v "$N/tests:/tests:ro" -v "$T:/out" -w /ui node:22 sleep infinity >/dev/null
