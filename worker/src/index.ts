@@ -4,11 +4,18 @@
 // server needs a subdomain or an open port.
 import { Hono } from 'hono'
 import { decrypt, encrypt } from './crypto'
+import { ensureSchema, storedTokenKey } from './schema'
+import {
+  adminConfigured, clearFailures, clearedCookie, passwordMatches, recordFailure, sessionCookie, tooManyFailures, validSession,
+} from './auth'
 import { activeFields, findVariant, validateNode, type NodeInput } from '../../shared/protocols'
 
 export type Env = {
   DB: D1Database
   ASSETS: Fetcher
+  /** the admin password (secret; the Deploy to Cloudflare form asks for it) */
+  ADMIN_PASSWORD?: string
+  /** the key for D1 (secret, optional): filled in from D1's own when not set */
   TOKEN_KEY: string
   /** the panel's public address, used in the install command (default: the request's origin) */
   PANEL_URL?: string
@@ -124,6 +131,48 @@ async function publicNode(env: Env, n: NodeRow) {
   const { params_enc: _p, link_enc: _l, ...rest } = n
   return { ...rest, labels: JSON.parse(n.labels), params, has_link: !!n.link_enc }
 }
+
+// ── every API request: the tables, the key, the session ──────────────────────
+app.use('/api/*', async (c, next) => {
+  await ensureSchema(c.env.DB)
+  if (!c.env.TOKEN_KEY) c.env.TOKEN_KEY = await storedTokenKey(c.env.DB)
+  await next()
+})
+
+// The admin API needs a session. psm-agent's endpoints use its own token, and
+// signing in is open (limited per address).
+const OPEN = new Set(['/api/session', '/api/login', '/api/logout'])
+app.use('/api/*', async (c, next) => {
+  const path = new URL(c.req.url).pathname
+  if (path.startsWith('/api/agent/') || OPEN.has(path)) return next()
+  if (!adminConfigured(c.env)) return c.json(fail('not_configured', 'set the ADMIN_PASSWORD secret (8+ characters)'), 503)
+  if (!(await validSession(c.env, c.req.header('Cookie')))) return c.json(fail('unauthorized', 'sign in first'), 401)
+  await next()
+})
+
+const isHttps = (url: string) => new URL(url).protocol === 'https:'
+
+app.get('/api/session', async (c) =>
+  c.json({ configured: adminConfigured(c.env), authenticated: await validSession(c.env, c.req.header('Cookie')) }))
+
+app.post('/api/login', async (c) => {
+  if (!adminConfigured(c.env)) return c.json(fail('not_configured', 'set the ADMIN_PASSWORD secret (8+ characters)'), 503)
+  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown'
+  if (await tooManyFailures(c.env.DB, ip)) return c.json(fail('too_many', 'too many failed sign-ins; try again in 15 minutes'), 429)
+  const body = await c.req.json<{ password?: unknown }>().catch(() => null)
+  if (!(await passwordMatches(c.env, typeof body?.password === 'string' ? body.password : ''))) {
+    await recordFailure(c.env.DB, ip)
+    return c.json(fail('bad_password', 'wrong password'), 401)
+  }
+  await clearFailures(c.env.DB, ip)
+  c.header('Set-Cookie', await sessionCookie(c.env, isHttps(c.req.url)))
+  return c.json({ ok: true })
+})
+
+app.post('/api/logout', (c) => {
+  c.header('Set-Cookie', clearedCookie(isHttps(c.req.url)))
+  return c.body(null, 204)
+})
 
 // ── servers ──────────────────────────────────────────────────────────────────
 app.get('/api/servers', async (c) => {

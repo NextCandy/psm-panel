@@ -31,9 +31,11 @@ docker run -d --name "$K" --network "$NET" --network-alias panel -v "$N:/app" -w
 chk "npm install" docker exec "$K" npm install --no-audit --no-fund
 chk "typecheck" docker exec "$K" npx tsc --noEmit
 chk "build the pages" docker exec "$K" npm run build
-# SYNC_INTERVAL=10 keeps the test short (the default is 30)
-docker exec "$K" sh -c "printf 'TOKEN_KEY=%s\nPANEL_URL=http://panel:8787\nSYNC_INTERVAL=10\n' \$(head -c 32 /dev/urandom | base64) > .dev.vars"
-chk "D1 migrations" docker exec "$K" npx wrangler d1 migrations apply psm-panel --local
+# As after a one-click deploy: only the admin password, no TOKEN_KEY (the panel
+# makes its own key) and no migration step (the Worker makes its own tables).
+# SYNC_INTERVAL=10 keeps the test short (the default is 30).
+ADMIN=m1-admin-pass-123
+docker exec "$K" sh -c "printf 'ADMIN_PASSWORD=$ADMIN\nPANEL_URL=http://panel:8787\nSYNC_INTERVAL=10\n' > .dev.vars"
 docker exec -d "$K" sh -c 'npx wrangler dev --ip 0.0.0.0 --port 8787 > /tmp/wrangler.log 2>&1'
 
 sec "a PSM server with three cores"
@@ -52,12 +54,28 @@ docker exec "$V" bash -c '
             openssl x509 -req -in $CA/$1.csr -CA $CA/ca.crt -CAkey $CA/ca.key -CAcreateserial -days 7 -extfile $CA/$1.ext -out "$3" >/dev/null 2>&1; }
   issue t.example.com /etc/psm/certs/t.key /etc/psm/certs/t.crt
   issue x.example.com /etc/nginx/ssl/x.example.com/privkey.pem /etc/nginx/ssl/x.example.com/fullchain.pem'
-for _ in $(seq 1 60); do [[ "$(docker exec "$V" curl -s -o /dev/null -w '%{http_code}' http://panel:8787/api/servers)" == 200 ]] && break; sleep 2; done
-chk "the server reaches the panel" test "$(docker exec "$V" curl -s -o /dev/null -w '%{http_code}' http://panel:8787/api/servers)" = 200
+# the admin API needs the session cookie: from here on every curl in the server keeps one
+docker exec "$V" sh -c 'printf "cookie = /tmp/panel.cookies\ncookie-jar = /tmp/panel.cookies\n" > /root/.curlrc'
+for _ in $(seq 1 60); do [[ "$(docker exec "$V" curl -s -o /dev/null -w '%{http_code}' http://panel:8787/api/session)" == 200 ]] && break; sleep 2; done
+chk "the server reaches the panel" test "$(docker exec "$V" curl -s -o /dev/null -w '%{http_code}' http://panel:8787/api/session)" = 200
 
 api()  { docker exec "$V" curl -s -H 'Content-Type: application/json' "$@"; }
 code() { docker exec "$V" curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' "$@"; }
 B=http://panel:8787
+
+sec "admin sign-in; the Worker makes its own tables"
+chk "tables made on the first request" bash -c "docker exec $K npx wrangler d1 execute psm-panel --local --json --command 'SELECT name FROM psm_migrations' | grep -q 0002_auth.sql"
+noauth() { docker exec "$V" curl -q -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' "$@"; }   # -q: no cookie
+chk "the admin API needs a session → 401" test "$(noauth $B/api/servers)" = 401
+chk "a forged session → 401" test "$(noauth -b 'psm_session=4102444800.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' $B/api/servers)" = 401
+chk "a wrong password → 401" test "$(noauth -d '{"password":"not-the-one"}' $B/api/login)" = 401
+for _ in $(seq 1 10); do noauth -H 'CF-Connecting-IP: 198.51.100.9' -d '{"password":"guess"}' $B/api/login >/dev/null; done
+chk "ten wrong ones from one address, then even the right one → 429" \
+    test "$(noauth -H 'CF-Connecting-IP: 198.51.100.9' -d "{\"password\":\"$ADMIN\"}" $B/api/login)" = 429
+chk "signing in sets an HttpOnly, SameSite=Strict session cookie" bash -c \
+    "docker exec $V curl -s -D - -o /dev/null -H 'Content-Type: application/json' -d '{\"password\":\"$ADMIN\"}' $B/api/login | grep -qiE '^set-cookie: psm_session=[0-9]{10}\.[A-Za-z0-9_-]{43};.*HttpOnly.*SameSite=Strict'"
+chk "… and with it the admin API answers" test "$(code $B/api/servers)" = 200
+chk "psm-agent's join needs no session (a bad token → 403)" test "$(noauth -d '{"join_token":"x"}' $B/api/agent/join)" = 403
 
 sec "add the server, and nodes before it joins"
 api -X POST -d '{"name":"vps1"}' $B/api/servers > "$T/server.json"
@@ -138,7 +156,7 @@ sec "psm-agent opens no port; secrets stay out of D1 and the log"
 chk "psm-agent has no listening socket" bash -c "! docker exec $V ss -ltnup | grep -q psm-agent"
 chk "psm-agent is running" docker exec "$V" pgrep -f 'psm-agent run'
 AT=$(docker exec "$V" jq -r .token /etc/psm/agent.json)
-chk "D1 holds no agent token, join token or node password in clear" bash -c "! docker exec $K grep -rqE '$AT|$JT|m1-pass-secret' /app/.wrangler/state"
+chk "D1 holds no agent token, join token or node password in clear" bash -c "! docker exec $K grep -rqE '$AT|$JT|m1-pass-secret|$ADMIN' /app/.wrangler/state"
 chk "the agent log carries no token" bash -c "! docker exec $V grep -q '$AT' /var/log/psm-agent.log"
 
 sec "sync interval: 3 s while there is work, SYNC_INTERVAL (10 here) when idle"
@@ -162,7 +180,7 @@ sec "the page, driven in a browser (Playwright)"
 docker run -d --name "$U" --network "$NET" -v "$N/tests:/tests:ro" -v "$T:/out" -w /ui node:22 sleep infinity >/dev/null
 chk "Playwright + Chromium" docker exec "$U" sh -c 'npm init -y >/dev/null && npm install --no-audit --no-fund playwright >/dev/null 2>&1 && npx playwright install --with-deps chromium >/dev/null 2>&1'
 # run it from /ui, where playwright is installed (modules resolve from the script's directory)
-docker exec "$U" sh -c 'cp /tests/ui-m1.mjs /ui/ && node /ui/ui-m1.mjs http://panel:8787 /out' > "$T/ui.out" 2>&1; ui=$?
+docker exec "$U" sh -c "cp /tests/ui-m1.mjs /ui/ && node /ui/ui-m1.mjs http://panel:8787 /out $ADMIN" > "$T/ui.out" 2>&1; ui=$?
 sed 's/^/  /' "$T/ui.out"
 (( ui == 0 )) && ok "UI flow" || bad "UI flow"
 pass=$((pass + $(grep -c '^ok ' "$T/ui.out"))); fail=$((fail + $(grep -c '^FAIL ' "$T/ui.out")))

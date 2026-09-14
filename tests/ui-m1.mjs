@@ -1,10 +1,11 @@
 // The "新建节点" flow in a real browser: a TUIC node on vps1 through the
 // dialog, the install command shown after submitting, and the node reaching
 // "运行中" once psm-agent applies it; an empty submit shows the errors.
-// Usage: node ui-m1.mjs <panel url> <screenshot dir>
+// Signing in and out is checked around it.
+// Usage: node ui-m1.mjs <panel url> <screenshot dir> <admin password>
 import { chromium } from 'playwright'
 
-const [base, out] = process.argv.slice(2)
+const [base, out, password] = process.argv.slice(2)
 let failed = 0
 const ok = (m) => console.log(`ok   ${m}`)
 const bad = (m, e) => { failed++; console.log(`FAIL ${m}${e ? `: ${e.message ?? e}` : ''}`) }
@@ -16,8 +17,21 @@ const browser = await chromium.launch()
 const page = await browser.newPage({ viewport: { width: 1360, height: 900 }, locale: 'zh-CN' })
 const sel = (t) => `[data-test="${t}"]`
 
-await step('node list opens', async () => {
+await step('the page asks for the admin password', async () => {
   await page.goto(`${base}/#/nodes`)
+  await page.waitForSelector(sel('password'), { timeout: 15000 })
+})
+await page.screenshot({ path: `${out}/login.png` })
+
+await step('a wrong password is refused', async () => {
+  await page.fill(sel('password'), 'wrong-password')
+  await page.click(sel('login'))
+  await page.waitForSelector(sel('login-error'), { timeout: 5000 })
+})
+
+await step('signing in opens the node list', async () => {
+  await page.fill(sel('password'), password)
+  await page.click(sel('login'))
   await page.waitForSelector(sel('node-m1-xr'), { timeout: 15000 })
 })
 await page.screenshot({ path: `${out}/nodes.png`, fullPage: true })
@@ -94,6 +108,13 @@ await step('servers page shows vps1 online', async () => {
   await page.waitForSelector(`${sel('server-vps1')}[data-status="online"]`, { timeout: 10000 })
 })
 await page.screenshot({ path: `${out}/servers.png`, fullPage: true })
+
+await step('signing out ends the session', async () => {
+  await page.click(sel('logout'))
+  await page.waitForSelector(sel('password'), { timeout: 5000 })
+  await page.reload()
+  await page.waitForSelector(sel('password'), { timeout: 10000 })
+})
 
 await browser.close()
 process.exit(failed ? 1 : 0)

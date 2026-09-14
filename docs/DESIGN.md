@@ -7,13 +7,14 @@ PSM Panel 是 [PSM](https://github.com/jinqians/proxy-stack) 的网页管理后�
 - **只有一个域名。** 面板 `psm.jqwebs.cc` 就是前端、后端和订阅导出，VPS 不需要子域名、Tunnel、DNS 记录或 Access 应用。
 - **VPS 不开放任何端口。** VPS 上的 psm-agent 不监听任何端口（连本机回环都不监听），只主动用 HTTPS 连面板，和 Xboard 的节点后端（XrayR / V2bX）一样。
 - **面板不重写 PSM 的逻辑。** 面板下发的每个任务，在 VPS 上都是一条参数白名单校验过的 `psm … --json` 命令，参数以数组传递，从不经过 shell。
-- **VPS 不需要 Cloudflare 凭据**，面板运行时也不需要 Cloudflare API Token（只在部署时用）。
-- **仓库里没有任何密钥。** 凭据只放 GitHub Actions Secrets 和 Worker Secrets；D1 里的敏感内容加密保存。
+- **一键部署。** README 里的 Deploy to Cloudflare 按钮把仓库复制到用户自己的 GitHub、建好 D1、部署 Worker，表单里只填管理员密码；数据表由 Worker 第一次运行时自己建（`worker/src/schema.ts`），不需要迁移命令，也不需要 API Token。
+- **VPS 和面板运行时都不需要 Cloudflare 凭据。**
+- **仓库里没有任何密钥。** 凭据只放 Worker Secrets；D1 里的敏感内容加密保存。
 
 ## 2. 架构
 
 ```
-管理员浏览器 ──Access 登录──▶ psm.jqwebs.cc ◀── Cloudflare Worker + D1（后台 API、页面、任务队列、订阅）
+管理员浏览器 ──密码登录───▶ psm.jqwebs.cc ◀── Cloudflare Worker + D1（后台 API、页面、任务队列、订阅）
                                    ▲
        VPS hk1：psm-agent ─────────┤ 主动 HTTPS（空闲 30 秒一次）：上报状态、流量、任务结果；领取新任务
        VPS jp1：psm-agent ─────────┘
@@ -26,7 +27,7 @@ PSM Panel 是 [PSM](https://github.com/jinqians/proxy-stack) 的网页管理后�
 | 后台页面 | psm-panel/`web` | Vue 3 + Vite，Xboard 风格 |
 | psm-agent | proxy-stack/`agent` | Go 静态二进制（amd64 / arm64），GitHub Release 发布，安装时校验 sha256 |
 | 一键安装 | proxy-stack：`bootstrap.sh --panel … --join …` | Bash |
-| 部署 | psm-panel/`.github/workflows` | push 到 main 后 `wrangler deploy` + D1 迁移 |
+| 部署 | Deploy to Cloudflare 按钮（Workers Builds） | 复制仓库、建 D1、部署；之后推送自动部署 |
 
 ## 3. 后台界面（参考 Xboard）
 
@@ -87,16 +88,17 @@ agent 端再次校验每个任务：内核、协议、节点名（以字母或�
 
 ## 6. 鉴权
 
-- **管理后台**：Cloudflare Access（按邮箱放行）；Worker 校验 `Cf-Access-Jwt-Assertion`，关闭 `workers.dev` 访问，防止绕过 Access。
-- **`/api/agent/*`**：Access 放行（agent 不会登录），靠 agent 令牌鉴权；加入令牌一次性、限时。
-- **`/sub/<令牌>`**：Access 放行，靠随机订阅令牌；令牌可重置。
+- **管理后台**：管理员密码（Worker Secret `ADMIN_PASSWORD`，一键部署的表单里填，至少 8 位；没设置时后台只显示设置说明）。登录后发 HMAC 签名的会话 Cookie（HttpOnly、SameSite=Strict，HTTPS 下加 Secure，7 天）；签名密钥由密码派生，改密码即让所有会话失效。同一地址 15 分钟内失败 10 次后暂停登录。需要更强的保护时，可以在面板前面再加 Cloudflare Access（放行 `/api/agent/*`、`/sub/*`）。
+- **`/api/agent/*`**：不需要登录，靠 agent 令牌鉴权；加入令牌一次性、限时。
+- **`/sub/<令牌>`**：不需要登录，靠随机订阅令牌；令牌可重置。
 
 ## 7. 凭据
 
 | 名称 | 放在哪 | 用途 |
 | --- | --- | --- |
-| Cloudflare API Token | 只在 GitHub Actions Secrets | 部署 Worker、D1 迁移、绑定 `psm.jqwebs.cc`、初始化 Access 应用 |
-| `TOKEN_KEY` | Worker Secret | 加密 D1 里的节点参数、导出的链接 |
+| `ADMIN_PASSWORD` | Worker Secret（一键部署的表单里填） | 后台登录 |
+| `TOKEN_KEY` | 可选的 Worker Secret；不设时面板第一次运行生成一把，存在 D1 的 `settings` | 加密 D1 里的节点参数、导出的链接、任务 |
+| Cloudflare API Token | 一键部署不需要（用 Cloudflare 登录）；只有用 wrangler 命令行部署时才要 | 部署 |
 | agent 令牌 | VPS 上 psm-agent 的配置（600 权限）；面板只存 SHA-256 | agent 同步 |
 
 ## 8. D1 表
@@ -109,6 +111,9 @@ agent 端再次校验每个任务：内核、协议、节点名（以字母或�
 | `tasks` | 服务器、类型、参数、状态、结果、时间 |
 | `traffic` | 节点的流量用量（按天汇总） |
 | `audit` | 操作记录 |
+| `login_failures` | 登录失败记录（按地址限次） |
+| `settings` | 面板自己的设置（如自动生成的加密密钥） |
+| `psm_migrations` | 已应用的 `migrations/*.sql`（Worker 启动时自动应用） |
 
 ## 9. 分阶段计划
 
@@ -116,7 +121,7 @@ agent 端再次校验每个任务：内核、协议、节点名（以字母或�
 | --- | --- | --- |
 | **M0 链路**（已完成） | 读节点列表的最小链路 | 32/32 |
 | **M1 后台和新建节点** | Xboard 风格页面；服务器和节点管理；新建节点对话框；一键安装命令；psm-agent 同步和节点任务 | 从对话框建出的每种协议节点经 agent 在 PSM 里出现、参数一致；非法组合被拒；agent 不监听任何端口 |
-| **M2 一键接入和部署** | `bootstrap.sh --panel --join`；psm-agent 发布；独立版 Snell / ss-rust 不交互安装；面板部署到 `psm.jqwebs.cc`、Access | 在干净的测试容器上执行一键命令后：服务器在线、节点运行、没有新增监听端口 |
+| **M2 一键接入和部署** | 一键部署（Deploy to Cloudflare）和后台密码登录；`bootstrap.sh --panel --join`；psm-agent 发布；独立版 Snell / ss-rust 不交互安装；面板部署到 `psm.jqwebs.cc` | 在干净的测试容器上执行一键命令后：服务器在线、节点运行、没有新增监听端口 |
 | **M3 流量和状态** | 流量上报和配额、诊断、节点编辑 | — |
 | **M4 订阅** | 汇总订阅 `/sub/<令牌>`（按客户端返回通用 / Clash / sing-box 格式） | 一个订阅包含多台 VPS 的节点并能连通 |
 

@@ -1,5 +1,6 @@
-// psm-api tokens are stored encrypted with AES-GCM. The key is the TOKEN_KEY
-// Worker secret: 32 random bytes, base64. Stored form: base64(iv || ciphertext).
+// Node settings, client links and agent tasks are stored encrypted with
+// AES-GCM. The key is 32 random bytes, base64: the TOKEN_KEY secret, or the
+// panel's own key in D1 when that is not set. Stored form: base64(iv || ciphertext).
 
 async function importKey(secret: string): Promise<CryptoKey> {
   const raw = Uint8Array.from(atob(secret), (ch) => ch.charCodeAt(0))

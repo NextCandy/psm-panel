@@ -12,6 +12,8 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
     headers: { 'content-type': 'application/json', ...(init.headers as Record<string, string> | undefined) },
   })
   if (r.status === 204) return undefined as T
+  // the session ended (expired, or the password changed): back to the sign-in page
+  if (r.status === 401 && path !== '/api/login') window.dispatchEvent(new Event('psm:signed-out'))
   const body = await r.json().catch(() => ({}))
   if (!r.ok) throw new ApiError(body?.error?.message ?? `HTTP ${r.status}`, body?.error?.errors ?? [], r.status)
   return body as T

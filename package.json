@@ -3,13 +3,21 @@
   "private": true,
   "type": "module",
   "license": "AGPL-3.0-only",
+  "description": "PSM Panel: manage the nodes of many PSM servers from one web page",
+  "cloudflare": {
+    "label": "PSM Panel",
+    "products": ["Workers", "D1"],
+    "bindings": {
+      "ADMIN_PASSWORD": {
+        "description": "后台登录密码，至少 8 位。The admin password for the panel, 8+ characters."
+      }
+    }
+  },
   "scripts": {
     "build": "vite build --config web/vite.config.ts",
     "dev": "npm run build && wrangler dev",
     "deploy": "npm run build && wrangler deploy",
-    "typecheck": "tsc --noEmit",
-    "db:migrate:local": "wrangler d1 migrations apply psm-panel --local",
-    "db:migrate": "wrangler d1 migrations apply psm-panel --remote"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "hono": "4.13.7",

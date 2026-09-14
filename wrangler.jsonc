@@ -14,11 +14,11 @@
     {
       "binding": "DB",
       "database_name": "psm-panel",
-      // `wrangler d1 create psm-panel` prints the id of your database
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      // No database_id: the Deploy to Cloudflare button (or `wrangler deploy`)
+      // creates the database, and the Worker creates its own tables.
       "migrations_dir": "migrations"
     }
   ],
   "observability": { "enabled": true }
-  // Secrets (never in this file): TOKEN_KEY, ACCESS_CLIENT_ID, ACCESS_CLIENT_SECRET
+  // Secrets (never in this file): ADMIN_PASSWORD (required), TOKEN_KEY (optional)
 }
