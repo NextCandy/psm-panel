@@ -6,11 +6,19 @@
 import m0001 from '../../migrations/0001_init.sql'
 import m0002 from '../../migrations/0002_auth.sql'
 import m0003 from '../../migrations/0003_panel.sql'
+import m0004 from '../../migrations/0004_leave.sql'
+import m0005 from '../../migrations/0005_clash.sql'
+import m0006 from '../../migrations/0006_task_result.sql'
+import m0007 from '../../migrations/0007_templates.sql'
 
 const MIGRATIONS: [name: string, sql: string][] = [
   ['0001_init.sql', m0001],
   ['0002_auth.sql', m0002],
   ['0003_panel.sql', m0003],
+  ['0004_leave.sql', m0004],
+  ['0005_clash.sql', m0005],
+  ['0006_task_result.sql', m0006],
+  ['0007_templates.sql', m0007],
 ]
 
 let ready: Promise<void> | null = null

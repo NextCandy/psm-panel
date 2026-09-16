@@ -42,11 +42,33 @@ async function newCommand(s: Server) {
   const r = await api<{ install_command: string }>(`/api/servers/${s.id}/install-command`, { method: 'POST' })
   command.value = { server: s.name, text: r.install_command }
 }
+// Removing a joined, online server uninstalls on it what the panel made (its
+// nodes, standalone Snell / ss-rust, psm-agent); an offline one (or one stuck
+// leaving) can only be removed from the panel.
+const notice = ref('')
 async function remove(s: Server) {
-  if (!confirm(`从面板移除服务器 ${s.name}？它的节点记录也会移除（服务器上的节点不受影响）。`)) return
-  await api(`/api/servers/${s.id}`, { method: 'DELETE' })
+  const onServer = s.status === 'online'
+  const msg = s.status === 'pending'
+    ? `移除服务器 ${s.name}？它还没有接入，节点记录会一起删除。`
+    : onServer
+      ? `移除服务器 ${s.name}？\n\n服务器上由面板建的节点、独立安装的 Snell / ss-rust 和 psm-agent 会被卸载。PSM 本身、内核和在服务器命令行里建的节点会保留。`
+      : `${s.name} 现在${s.status === 'leaving' ? '还没有完成卸载' : '离线'}，无法在服务器上卸载。只从面板移除吗？\n\n服务器上的节点和 psm-agent 会保留；之后可以在服务器上执行 psm agent remove --yes 卸载 psm-agent。`
+  if (!confirm(msg)) return
+  error.value = ''
+  try {
+    await api(`/api/servers/${s.id}${onServer || s.status === 'pending' ? '' : '?force=1'}`, { method: 'DELETE' })
+    notice.value = onServer ? `正在卸载 ${s.name} 上由面板建的节点和 psm-agent，完成后它会从列表里消失。` : ''
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  }
   await load()
 }
+// while a server is leaving, look again every few seconds
+let leavingPoll: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  leavingPoll = setInterval(() => { if (servers.value.some((s) => s.status === 'leaving')) load() }, 4000)
+})
+onUnmounted(() => clearInterval(leavingPoll))
 
 async function readStatus(s: Server) {
   const r = await api<{ at: string | null; pending: boolean; report: Report | null }>(`/api/servers/${s.id}/status`)
@@ -66,7 +88,7 @@ async function diagnose(s: Server) {
 }
 const checks = (r: Report) => r.doctor?.checks ?? r.doctor?.results ?? []
 const problems = (r: Report) => checks(r).filter((c) => c.status && c.status !== 'ok' && c.status !== 'pass')
-const statusText = { online: '在线', pending: '待接入', offline: '离线' } as const
+const statusText = { online: '在线', pending: '待接入', offline: '离线', leaving: '卸载中' } as const
 </script>
 
 <template>
@@ -78,6 +100,7 @@ const statusText = { online: '在线', pending: '待接入', offline: '离线' }
     </form>
   </div>
   <div v-if="error" class="notice err">{{ error }}</div>
+  <div v-if="notice" class="notice ok" data-test="server-notice">{{ notice }}</div>
   <div v-if="command" class="card" style="padding: 16px; margin-bottom: 16px" data-test="server-command">
     <div class="field-label">在 {{ command.server }} 上以 root 执行：</div>
     <InstallCommand :command="command.text" />
@@ -90,7 +113,10 @@ const statusText = { online: '在线', pending: '待接入', offline: '离线' }
         <tr v-for="s in servers" :key="s.id" :data-test="`server-${s.name}`" :data-status="s.status">
           <td>{{ s.id }}</td>
           <td>{{ s.name }}</td>
-          <td><span class="status" :class="s.status"><span class="dot" />{{ statusText[s.status] }}</span></td>
+          <td>
+            <span class="status" :class="s.status"><span class="dot" />{{ statusText[s.status] }}</span>
+            <span v-if="s.leave_error" class="badge err" :title="s.leave_error">卸载失败</span>
+          </td>
           <td>{{ s.hostname ?? '—' }}</td>
           <td>{{ s.psm_version ?? '—' }}</td>
           <td>{{ s.agent_version ?? '—' }}</td>
@@ -100,7 +126,7 @@ const statusText = { online: '在线', pending: '待接入', offline: '离线' }
           <td>
             <button class="btn small ghost" :disabled="s.status === 'pending'" :data-test="`diagnose-${s.name}`" @click="diagnose(s)">诊断</button>
             <button class="btn small ghost" @click="newCommand(s)">安装命令</button>
-            <button class="btn small ghost danger" @click="remove(s)">移除</button>
+            <button class="btn small ghost danger" :data-test="`remove-${s.name}`" @click="remove(s)">{{ s.status === 'leaving' ? '只从面板移除' : '移除' }}</button>
           </td>
         </tr>
       </tbody>

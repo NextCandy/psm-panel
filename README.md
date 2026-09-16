@@ -9,7 +9,9 @@
 - **没装过 PSM 也能接入**：面板给出的一条命令会先装好 PSM，再接入面板；节点用到哪个内核（Xray / sing-box / mihomo）就自动装哪个。
 - **节点**：PSM 支持的全部协议，Snell 和 SS2022 可以用独立的 snell-server（v4 / v5 / v6）和 ss-rust 运行；新建、修改、删除都在面板里完成。
 - **流量**：每个节点本月用量、每日图表、流量上限（超额自动暂停，到重置日或手动重置后恢复）。
-- **订阅**：一个地址汇总所有服务器的节点，可按标签筛选；通用链接、Clash / mihomo、sing-box、Surge 格式，按客户端自动识别。
+- **出口分流**：建节点时可以选择让这个节点的 AI、流媒体或全部流量走 Cloudflare WARP 或免费家宽线路（VPNGate），其余流量照常从服务器直连；删除节点时规则一起删掉。
+- **REALITY 伪装目标自动选择**：填上网络测绘引擎（Netlas / Quake / ZoomEye / FOFA）的 API Key，面板让服务器查同一个 ASN 里有证书的网站，逐个做 TLS 握手检查后一键填入。
+- **订阅**：一个地址汇总所有服务器的节点，可按标签筛选；通用链接、Clash / mihomo、Stash、sing-box、Surge、Quantumult X、Loon，按客户端自动识别。每种格式都有带基础分流（广告拦截、AI、流媒体、国内直连）的内置模板，也可以复制一份改成自己的模板。
 - **诊断和记录**：一键收集服务器的 PSM 版本、内核、`psm doctor` 结果；所有操作都有记录。
 
 完整的部署和使用文档：**https://jinqians.github.io/psm-panel-docs/**

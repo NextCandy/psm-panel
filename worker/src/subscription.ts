@@ -1,25 +1,33 @@
 // Subscriptions: the running nodes of every server behind one URL, in the
 // format the client wants — a base64 list of share links (v2rayN, Shadowrocket,
-// Hiddify …), Clash / mihomo YAML, a sing-box config, or Surge proxy lines.
-// Node names become "<server>-<node>" so nodes of the same name on different
-// servers stay apart.
+// Hiddify …), or a whole client profile made from a template: Clash / mihomo,
+// Stash, sing-box, Surge, Quantumult X or Loon (templates.ts). Node names
+// become "<server>-<node>" so nodes of the same name on different servers
+// stay apart.
+
+import { BUILTIN_TEMPLATES, renderTemplate, TEMPLATE_FORMATS, type TemplateFormat } from './templates'
 
 export type SubNode = {
   server: string
   name: string
   link: string | null
   outbound: Record<string, unknown> | null
+  /** the node as a ready mihomo proxy (psm node export --format clash) */
+  clash?: Record<string, unknown> | null
 }
 
-export type Format = 'uri' | 'clash' | 'singbox' | 'surge'
-export const FORMATS: Format[] = ['uri', 'clash', 'singbox', 'surge']
+export type Format = 'uri' | TemplateFormat
+export const FORMATS: Format[] = ['uri', ...TEMPLATE_FORMATS]
 
 /** ?format= first, then the client's User-Agent; share links by default. */
 export function pickFormat(query: string | null | undefined, userAgent: string): Format {
   if (query && (FORMATS as string[]).includes(query)) return query as Format
   if (/sing-box|\bSF[AIMT]\//i.test(userAgent)) return 'singbox'
-  if (/clash|mihomo|stash|verge|nyanpasu/i.test(userAgent)) return 'clash'
+  if (/stash/i.test(userAgent)) return 'stash'
+  if (/clash|mihomo|verge|nyanpasu/i.test(userAgent)) return 'clash'
   if (/surge/i.test(userAgent)) return 'surge'
+  if (/quantumult/i.test(userAgent)) return 'quanx'
+  if (/loon/i.test(userAgent)) return 'loon'
   return 'uri'
 }
 
@@ -59,78 +67,28 @@ function uriList(nodes: SubNode[]): string[] {
   return nodes.filter((n) => n.link && isShareLink(n.link)).map((n) => renameLink(n.link!, displayName(n)))
 }
 
-function clashYaml(selfUrl: string): string {
-  // The proxies come from a proxy-provider on this subscription's share-link
-  // format: mihomo parses share links itself, so no protocol is translated here.
-  const url = `${selfUrl}${selfUrl.includes('?') ? '&' : '?'}format=uri`
-  return `# PSM Panel subscription for mihomo / Clash Meta
-mixed-port: 7890
-allow-lan: false
-mode: rule
-log-level: info
+/** A node's own Surge line (standalone Snell and SS2022 export one), renamed. */
+const surgeLineOf = (n: SubNode) =>
+  n.link && isSurgeLine(n.link) ? `${displayName(n)} = ${n.link.slice(n.link.indexOf(' = ') + 3)}` : null
 
-proxy-providers:
-  psm:
-    type: http
-    url: ${JSON.stringify(url)}
-    interval: 3600
-    path: ./psm-panel.yaml
-    health-check:
-      enable: true
-      url: http://www.gstatic.com/generate_204
-      interval: 300
-
-proxy-groups:
-  - name: PSM
-    type: select
-    proxies:
-      - 自动选择
-      - DIRECT
-    use:
-      - psm
-  - name: 自动选择
-    type: url-test
-    url: http://www.gstatic.com/generate_204
-    interval: 300
-    use:
-      - psm
-
-rules:
-  - GEOIP,PRIVATE,DIRECT,no-resolve
-  - MATCH,PSM
-`
+const CONTENT: Record<TemplateFormat, { type: string; ext: string }> = {
+  clash: { type: 'text/yaml; charset=utf-8', ext: 'yaml' },
+  stash: { type: 'text/yaml; charset=utf-8', ext: 'yaml' },
+  singbox: { type: 'application/json; charset=utf-8', ext: 'json' },
+  surge: { type: 'text/plain; charset=utf-8', ext: 'conf' },
+  quanx: { type: 'text/plain; charset=utf-8', ext: 'conf' },
+  loon: { type: 'text/plain; charset=utf-8', ext: 'conf' },
 }
 
-function singboxConfig(nodes: SubNode[]): string {
-  const outbounds = nodes
-    .filter((n) => n.outbound)
-    .map((n) => ({ ...n.outbound!, tag: displayName(n) }))
-  const tags = outbounds.map((o) => o.tag as string)
-  const groups: Record<string, unknown>[] = [
-    { type: 'selector', tag: 'PSM', outbounds: [...(tags.length ? ['自动选择'] : []), ...tags, 'direct'], default: tags.length ? '自动选择' : 'direct' },
-  ]
-  if (tags.length) groups.push({ type: 'urltest', tag: '自动选择', outbounds: tags, url: 'https://www.gstatic.com/generate_204', interval: '5m' })
-  return JSON.stringify({
-    log: { level: 'info' },
-    inbounds: [{ type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 7890 }],
-    outbounds: [...groups, ...outbounds, { type: 'direct', tag: 'direct' }],
-    route: { rules: [{ action: 'sniff' }, { ip_is_private: true, outbound: 'direct' }], final: 'PSM' },
-  }, null, 2)
-}
-
-function surgeProxies(nodes: SubNode[]): string {
-  const lines = nodes
-    .filter((n) => n.link && isSurgeLine(n.link))
-    .map((n) => `${displayName(n)} = ${n.link!.slice(n.link!.indexOf(' = ') + 3)}`)
-  return `[Proxy]\n${lines.join('\n')}\n`
-}
-
-/** The subscription body and its content type. selfUrl: this subscription's URL. */
-export function buildSubscription(format: Format, nodes: SubNode[], selfUrl: string): { body: string; type: string; ext: string } {
-  switch (format) {
-    case 'clash': return { body: clashYaml(selfUrl), type: 'text/yaml; charset=utf-8', ext: 'yaml' }
-    case 'singbox': return { body: singboxConfig(nodes), type: 'application/json; charset=utf-8', ext: 'json' }
-    case 'surge': return { body: surgeProxies(nodes), type: 'text/plain; charset=utf-8', ext: 'conf' }
-    default: return { body: b64(uriList(nodes).join('\n')), type: 'text/plain; charset=utf-8', ext: 'txt' }
-  }
+/**
+ * The subscription body and its content type. selfUrl: this subscription's
+ * URL; template: the body of the subscription's own template for this format
+ * (the built-in one when absent).
+ */
+export function buildSubscription(format: Format, nodes: SubNode[], selfUrl: string,
+  opts: { name?: string; template?: string | null } = {}): { body: string; type: string; ext: string } {
+  if (format === 'uri') return { body: b64(uriList(nodes).join('\n')), type: 'text/plain; charset=utf-8', ext: 'txt' }
+  const body = renderTemplate(format, opts.template ?? BUILTIN_TEMPLATES[format].body,
+    { name: opts.name ?? 'PSM', selfUrl, nodes, displayName, surgeLineOf })
+  return { body, ...CONTENT[format] }
 }

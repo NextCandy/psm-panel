@@ -61,6 +61,41 @@ function addLabel() {
 
 const num = (v: string | number) => (v === '' ? undefined : Number(v))
 
+// REALITY: camouflage targets in the chosen server's own network, found by the
+// server (psm sni find, with the mapping engine from 系统设置) and filled in
+// with one click.
+type SniCandidate = { sni: string; dest: string; rtt_ms: number; warn: string }
+const sni = reactive({ busy: false, error: '', where: '', candidates: [] as SniCandidate[] })
+const canFindSni = computed(() => !editing.value && fields.value.some((f) => f.key === 'server_name') &&
+  typeof form.server === 'number' && props.servers.find((s) => s.id === form.server)?.status !== 'pending')
+async function findSni() {
+  Object.assign(sni, { busy: true, error: '', where: '', candidates: [] })
+  try {
+    const { task_id } = await api<{ task_id: number }>(`/api/servers/${form.server}/sni-find`, { method: 'POST' })
+    const end = Date.now() + 6 * 60 * 1000
+    while (Date.now() < end) {
+      await new Promise((r) => setTimeout(r, 3000))
+      const t = await api<{ status: string; error?: string; result?: { asn?: number; country?: string; candidates?: SniCandidate[] } }>(`/api/tasks/${task_id}`)
+      if (t.status === 'done') {
+        sni.candidates = t.result?.candidates ?? []
+        sni.where = t.result?.asn ? `AS${t.result.asn} ${t.result.country ?? ''}` : ''
+        if (!sni.candidates.length) sni.error = '没有找到能用的伪装目标，请手动填写'
+        return
+      }
+      if (t.status === 'failed') { sni.error = t.error || '查询失败'; return }
+    }
+    sni.error = '服务器没有及时回复（离线了吗？）'
+  } catch (e) {
+    sni.error = e instanceof ApiError && e.errors.length ? e.errors.join('；') : String((e as Error).message)
+  } finally {
+    sni.busy = false
+  }
+}
+function pickSni(c: SniCandidate) {
+  params.server_name = c.sni
+  if (fields.value.some((f) => f.key === 'dest')) params.dest = c.dest
+}
+
 async function submit() {
   errors.value = []
   if (!variant.value) return (errors.value = ['请选择协议类型'])
@@ -225,6 +260,24 @@ async function submit() {
             <input v-else v-model="params[f.key]" class="input" :type="f.type === 'number' ? 'number' : f.type === 'password' ? 'password' : 'text'"
               :placeholder="f.placeholder" :data-test="`param-${f.key}`">
             <div v-if="f.help" class="help">{{ f.help }}</div>
+          </div>
+          <div v-if="canFindSni" class="field" data-test="sni-finder">
+            <button class="btn ghost" type="button" :disabled="sni.busy" data-test="find-sni" @click="findSni">
+              {{ sni.busy ? '服务器查询中…（约一分钟）' : '自动选择伪装目标（服务器所在网络）' }}
+            </button>
+            <div class="help">用系统设置里的网络测绘引擎，查服务器同一 ASN 里有证书的网站，逐个做 TLS 握手检查。</div>
+            <div v-if="sni.error" class="notice err" data-test="sni-error">{{ sni.error }}</div>
+            <div v-if="sni.candidates.length" class="table-wrap">
+              <div class="help">{{ sni.where }} 可用的伪装目标（按延迟排序）：</div>
+              <table>
+                <tbody>
+                  <tr v-for="c in sni.candidates" :key="c.sni + c.dest">
+                    <td>{{ c.sni }}</td><td class="muted">{{ c.dest }}</td><td>{{ c.rtt_ms }} ms</td>
+                    <td><button class="btn ghost" type="button" :data-test="`pick-sni-${c.sni}`" @click="pickSni(c)">使用</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </template>
         <button type="submit" hidden />

@@ -9,6 +9,7 @@ import {
   adminConfigured, clearFailures, clearedCookie, passwordMatches, recordFailure, sessionCookie, tooManyFailures, validSession,
 } from './auth'
 import { buildSubscription, pickFormat, type SubNode } from './subscription'
+import { BUILTIN_TEMPLATES, FORMAT_LABELS, TEMPLATE_FORMATS, type TemplateFormat } from './templates'
 import { activeFields, findVariant, trafficTag, validateNode, type NodeInput } from '../../shared/protocols'
 
 // not exported: every export of a Worker's main module is taken for an entrypoint
@@ -33,16 +34,17 @@ type ServerRow = {
   id: number; name: string; agent_token_hash: string | null; hostname: string | null
   agent_version: string | null; note: string; last_seen: string | null; created_at: string
   psm_version: string | null; status_enc: string | null; status_at: string | null
+  leaving: number; leave_error: string | null
 }
 type NodeRow = {
   id: number; server_id: number; protocol: string; variant: string; engine: string; psm_protocol: string
   name: string; address: string; port: number; public_port: number | null; traffic_limit_gb: number
-  labels: string; params_enc: string; link_enc: string | null; outbound_enc: string | null
+  labels: string; params_enc: string; link_enc: string | null; outbound_enc: string | null; clash_enc: string | null
   status: string; last_error: string | null; created_at: string
   traffic_used: number; traffic_paused: number; traffic_at: string | null; reset_day: number
 }
 type TaskRow = { id: number; server_id: number; node_id: number | null; kind: string; payload_enc: string; status: string }
-type AgentResult = { task_id: number; ok: boolean; link?: string; outbound?: unknown; error?: string; output?: unknown }
+type AgentResult = { task_id: number; ok: boolean; link?: string; outbound?: unknown; clash?: unknown; error?: string; output?: unknown }
 type TrafficEntry = { tag?: unknown; used_bytes?: unknown; paused?: unknown }
 type C = Context<{ Bindings: Env }>
 
@@ -116,7 +118,7 @@ async function newJoinToken(env: Env, serverId: number): Promise<string> {
   return token
 }
 
-const serverStatusSQL = (env: Env) => `CASE WHEN s.agent_token_hash IS NULL THEN 'pending'
+const serverStatusSQL = (env: Env) => `CASE WHEN s.leaving = 1 THEN 'leaving' WHEN s.agent_token_hash IS NULL THEN 'pending'
   WHEN s.last_seen >= datetime('now', '-${syncInterval(env) * 3} seconds') THEN 'online' ELSE 'offline' END`
 
 async function getServer(env: Env, id: string | number): Promise<ServerRow | null> {
@@ -129,10 +131,13 @@ async function getNode(env: Env, id: string | number): Promise<NodeRow | null> {
   return env.DB.prepare('SELECT * FROM nodes WHERE id = ?').bind(Number(id)).first<NodeRow>()
 }
 
-async function enqueue(env: Env, serverId: number, nodeId: number | null, task: Record<string, unknown>) {
-  await env.DB.prepare('INSERT INTO tasks (server_id, node_id, kind, payload_enc) VALUES (?, ?, ?, ?)')
+async function enqueue(env: Env, serverId: number, nodeId: number | null, task: Record<string, unknown>): Promise<number> {
+  const r = await env.DB.prepare('INSERT INTO tasks (server_id, node_id, kind, payload_enc) VALUES (?, ?, ?, ?)')
     .bind(serverId, nodeId, task.kind as string, await encrypt(env.TOKEN_KEY, JSON.stringify(task))).run()
+  return Number(r.meta.last_row_id)
 }
+
+const SNI_ENGINES = ['netlas', 'quake', 'zoomeye', 'fofa']
 
 const linkFormat = (n: { psm_protocol: string }) => (n.psm_protocol === 'snell' ? 'surge' : 'uri')
 
@@ -174,7 +179,7 @@ async function publicNode(env: Env, n: NodeRow) {
   const v = findVariant(n.protocol, n.variant)
   const secret = new Set((v?.fields ?? []).filter((f) => f.type === 'password').map((f) => f.key))
   for (const k of Object.keys(params)) if (secret.has(k) && params[k]) params[k] = MASK
-  const { params_enc: _p, link_enc: _l, outbound_enc: _o, ...rest } = n
+  const { params_enc: _p, link_enc: _l, outbound_enc: _o, clash_enc: _c, ...rest } = n
   return { ...rest, traffic_paused: !!n.traffic_paused, labels: JSON.parse(n.labels), params, has_link: !!n.link_enc }
 }
 
@@ -241,7 +246,7 @@ app.post('/api/logout', (c) => {
 app.get('/api/servers', async (c) => {
   const { results } = await c.env.DB.prepare(
     `SELECT s.id, s.name, ${serverStatusSQL(c.env)} AS status, s.hostname, s.agent_version, s.psm_version, s.note,
-            s.last_seen, s.created_at, s.status_at,
+            s.last_seen, s.created_at, s.status_at, s.leave_error,
             (SELECT COUNT(*) FROM nodes n WHERE n.server_id = s.id) AS node_count,
             (SELECT COALESCE(SUM(n.traffic_used), 0) FROM nodes n WHERE n.server_id = s.id) AS traffic_used
        FROM servers s ORDER BY s.id`).all()
@@ -271,12 +276,35 @@ app.post('/api/servers/:id/install-command', async (c) => {
   return c.json({ install_command: await installCommand(c, await newJoinToken(c.env, s.id)) })
 })
 
+// Remove a server. One that has joined is asked to clean up first: its agent
+// deletes the nodes and standalone servers made from the panel (not those made
+// on the server's own command line; PSM and the cores stay), reports, and
+// uninstalls psm-agent; the server leaves the panel when that report arrives
+// (202). ?force=1 removes it from the panel only — for a server that is gone or
+// offline (it keeps its nodes; `psm agent remove --yes` there uninstalls the
+// agent). One that never joined goes at once (204).
 app.delete('/api/servers/:id', async (c) => {
   const s = await getServer(c.env, c.req.param('id'))
   if (!s) return c.json(fail('not_found', 'no such server'), 404)
-  await c.env.DB.prepare('DELETE FROM servers WHERE id = ?').bind(s.id).run()
-  await audit(c.env, 'server.delete', s.name)
-  return c.body(null, 204)
+  const force = new URL(c.req.url).searchParams.get('force') === '1'
+  if (!s.agent_token_hash || force) {
+    await c.env.DB.prepare('DELETE FROM servers WHERE id = ?').bind(s.id).run()
+    await audit(c.env, s.agent_token_hash ? 'server.forget' : 'server.delete', s.name)
+    return c.body(null, 204)
+  }
+  if (s.leaving) return c.json({ status: 'leaving' }, 202)
+  const { results } = await c.env.DB.prepare(`SELECT * FROM nodes WHERE server_id = ? AND status != 'waiting'`).bind(s.id).all<NodeRow>()
+  const plan = {
+    nodes: results.filter((n) => n.engine !== 'standalone').map((n) => ({ core: n.engine, protocol: n.psm_protocol, tag: n.name })),
+    standalone: [...new Set(results.filter((n) => n.engine === 'standalone').map((n) => n.psm_protocol))],
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare(`DELETE FROM tasks WHERE server_id = ? AND status = 'queued'`).bind(s.id),
+    c.env.DB.prepare(`UPDATE servers SET leaving = 1, leave_error = NULL WHERE id = ?`).bind(s.id),
+  ])
+  await enqueue(c.env, s.id, null, { kind: 'agent.leave', data: plan })
+  await audit(c.env, 'server.leave', s.name, `${plan.nodes.length} 个节点，${plan.standalone.length} 个独立安装`)
+  return c.json({ status: 'leaving' }, 202)
 })
 
 // Diagnostics: ask the server's agent for a status report (psm doctor, cores,
@@ -467,12 +495,29 @@ app.post('/api/nodes/:id/traffic/reset', async (c) => {
 })
 
 // ── subscriptions ────────────────────────────────────────────────────────────
-type SubRow = { id: number; name: string; labels: string; token_hash: string; token_enc: string; last_used: string | null; created_at: string }
+type SubRow = { id: number; name: string; labels: string; token_hash: string; token_enc: string; last_used: string | null; created_at: string; templates: string }
 
 async function publicSub(c: C, s: SubRow) {
   const token = await decrypt(c.env.TOKEN_KEY, s.token_enc)
   const url = `${await panelUrl(c)}/sub/${token}`
-  return { id: s.id, name: s.name, labels: JSON.parse(s.labels), last_used: s.last_used, created_at: s.created_at, url }
+  return { id: s.id, name: s.name, labels: JSON.parse(s.labels), last_used: s.last_used, created_at: s.created_at, url,
+    templates: JSON.parse(s.templates || '{}') as Record<string, number> }
+}
+
+/** A subscription's template choices, checked: format → one of the user's templates of that format. */
+async function cleanTemplateChoices(env: Env, raw: unknown): Promise<Record<string, number> | string> {
+  const out: Record<string, number> = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const [format, id] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(TEMPLATE_FORMATS as string[]).includes(format)) return `没有这种格式：${format}`
+    if (id === null || id === '' || id === 'builtin') continue   // the built-in template
+    const row = Number.isInteger(id)
+      ? await env.DB.prepare('SELECT id FROM templates WHERE id = ? AND format = ?').bind(id, format).first()
+      : null
+    if (!row) return `${FORMAT_LABELS[format as TemplateFormat]} 模板不存在`
+    out[format] = id as number
+  }
+  return out
 }
 
 app.get('/api/subscriptions', async (c) => {
@@ -495,12 +540,18 @@ app.post('/api/subscriptions', async (c) => {
 app.patch('/api/subscriptions/:id', async (c) => {
   const s = await c.env.DB.prepare('SELECT * FROM subscriptions WHERE id = ?').bind(Number(c.req.param('id'))).first<SubRow>()
   if (!s) return c.json(fail('not_found', 'no such subscription'), 404)
-  const body = await c.req.json<{ name?: string; labels?: unknown }>().catch(() => null)
+  const body = await c.req.json<{ name?: string; labels?: unknown; templates?: unknown }>().catch(() => null)
   const name = body?.name?.trim().slice(0, 48) || s.name
   const labels = body?.labels !== undefined ? JSON.stringify(cleanLabels(body.labels)) : s.labels
-  await c.env.DB.prepare('UPDATE subscriptions SET name = ?, labels = ? WHERE id = ?').bind(name, labels, s.id).run()
+  let templates = s.templates || '{}'
+  if (body?.templates !== undefined) {
+    const t = await cleanTemplateChoices(c.env, body.templates)
+    if (typeof t === 'string') return c.json(fail('invalid', t, { errors: [t] }), 400)
+    templates = JSON.stringify(t)
+  }
+  await c.env.DB.prepare('UPDATE subscriptions SET name = ?, labels = ?, templates = ? WHERE id = ?').bind(name, labels, templates, s.id).run()
   await audit(c.env, 'subscription.update', name)
-  return c.json(await publicSub(c, { ...s, name, labels }))
+  return c.json(await publicSub(c, { ...s, name, labels, templates }))
 })
 
 // A new URL; the old one stops working.
@@ -531,19 +582,25 @@ app.get('/sub/:token', async (c) => {
   if (!s) return c.text('not found', 404)
   const labels = JSON.parse(s.labels) as string[]
   const { results } = await c.env.DB.prepare(
-    `SELECT n.name, n.labels, n.link_enc, n.outbound_enc, n.traffic_used, n.traffic_limit_gb, s.name AS server
+    `SELECT n.name, n.labels, n.link_enc, n.outbound_enc, n.clash_enc, n.traffic_used, n.traffic_limit_gb, s.name AS server
        FROM nodes n JOIN servers s ON s.id = n.server_id
       WHERE n.status = 'applied' AND n.traffic_paused = 0 ORDER BY s.id, n.id`)
-    .all<{ name: string; labels: string; link_enc: string | null; outbound_enc: string | null; traffic_used: number; traffic_limit_gb: number; server: string }>()
+    .all<{ name: string; labels: string; link_enc: string | null; outbound_enc: string | null; clash_enc: string | null; traffic_used: number; traffic_limit_gb: number; server: string }>()
   const chosen = results.filter((n) => !labels.length || (JSON.parse(n.labels) as string[]).some((l) => labels.includes(l)))
   const nodes: SubNode[] = await Promise.all(chosen.map(async (n) => ({
     server: n.server, name: n.name,
     link: n.link_enc ? await decrypt(c.env.TOKEN_KEY, n.link_enc) : null,
     outbound: n.outbound_enc ? JSON.parse(await decrypt(c.env.TOKEN_KEY, n.outbound_enc)) : null,
+    clash: n.clash_enc ? JSON.parse(await decrypt(c.env.TOKEN_KEY, n.clash_enc)) : null,
   })))
   const url = new URL(c.req.url)
   const format = pickFormat(url.searchParams.get('format'), c.req.header('User-Agent') ?? '')
-  const out = buildSubscription(format, nodes, `${await panelUrl(c)}/sub/${token}`)
+  // the subscription's own template for this format, or the built-in one
+  const chosen_tpl = format === 'uri' ? undefined : (JSON.parse(s.templates || '{}') as Record<string, unknown>)[format]
+  const tpl = Number.isInteger(chosen_tpl)
+    ? await c.env.DB.prepare('SELECT body FROM templates WHERE id = ? AND format = ?').bind(chosen_tpl, format).first<{ body: string }>()
+    : null
+  const out = buildSubscription(format, nodes, `${await panelUrl(c)}/sub/${token}`, { name: s.name, template: tpl?.body })
   await c.env.DB.prepare(`UPDATE subscriptions SET last_used = datetime('now') WHERE id = ?`).bind(s.id).run()
   const used = chosen.reduce((a, n) => a + (n.traffic_used || 0), 0)
   const total = chosen.every((n) => n.traffic_limit_gb > 0) ? Math.round(chosen.reduce((a, n) => a + n.traffic_limit_gb * GB, 0)) : 0
@@ -556,6 +613,64 @@ app.get('/sub/:token', async (c) => {
   })
 })
 
+// ── subscription templates ───────────────────────────────────────────────────
+// The built-in ones (templates.ts) to start from, and the user's own.
+type TemplateRow = { id: number; name: string; format: string; body: string; created_at: string; updated_at: string | null }
+
+function templateProblem(format: string, name: string, body: string): string | null {
+  if (!(TEMPLATE_FORMATS as string[]).includes(format)) return '格式：Clash、Stash、sing-box、Surge、Quantumult X 或 Loon'
+  if (!name.trim() || name.trim().length > 48) return '模板名称：1-48 个字符'
+  if (!body.trim() || body.length > 64 * 1024) return '模板内容：不能为空，最多 64 KB'
+  if (!/^[ \t]*\{\{proxies\}\}[ \t]*$/m.test(body)) return '模板里要有单独占一行的 {{proxies}}，节点写在那里'
+  return null
+}
+
+app.get('/api/templates', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM templates ORDER BY format, id').all<TemplateRow>()
+  return c.json({
+    formats: FORMAT_LABELS,
+    builtin: TEMPLATE_FORMATS.map((f) => ({ format: f, name: BUILTIN_TEMPLATES[f].name, body: BUILTIN_TEMPLATES[f].body })),
+    custom: results,
+  })
+})
+
+app.post('/api/templates', async (c) => {
+  const b = await c.req.json<{ name?: string; format?: string; body?: string }>().catch(() => null)
+  const problem = templateProblem(b?.format ?? '', b?.name ?? '', b?.body ?? '')
+  if (problem) return c.json(fail('invalid', problem, { errors: [problem] }), 400)
+  const r = await c.env.DB.prepare('INSERT INTO templates (name, format, body) VALUES (?, ?, ?)').bind(b!.name!.trim(), b!.format, b!.body).run()
+  await audit(c.env, 'template.add', b!.name!.trim(), FORMAT_LABELS[b!.format as TemplateFormat])
+  return c.json(await c.env.DB.prepare('SELECT * FROM templates WHERE id = ?').bind(Number(r.meta.last_row_id)).first<TemplateRow>(), 201)
+})
+
+app.put('/api/templates/:id', async (c) => {
+  const t = await c.env.DB.prepare('SELECT * FROM templates WHERE id = ?').bind(Number(c.req.param('id'))).first<TemplateRow>()
+  if (!t) return c.json(fail('not_found', '没有这个模板'), 404)
+  const b = await c.req.json<{ name?: string; body?: string }>().catch(() => null)
+  const name = b?.name?.trim() ?? t.name, body = b?.body ?? t.body
+  const problem = templateProblem(t.format, name, body)
+  if (problem) return c.json(fail('invalid', problem, { errors: [problem] }), 400)
+  await c.env.DB.prepare(`UPDATE templates SET name = ?, body = ?, updated_at = datetime('now') WHERE id = ?`).bind(name, body, t.id).run()
+  await audit(c.env, 'template.update', name, FORMAT_LABELS[t.format as TemplateFormat])
+  return c.json(await c.env.DB.prepare('SELECT * FROM templates WHERE id = ?').bind(t.id).first<TemplateRow>())
+})
+
+// Subscriptions that used it go back to the built-in template.
+app.delete('/api/templates/:id', async (c) => {
+  const t = await c.env.DB.prepare('SELECT * FROM templates WHERE id = ?').bind(Number(c.req.param('id'))).first<TemplateRow>()
+  if (!t) return c.json(fail('not_found', '没有这个模板'), 404)
+  const { results } = await c.env.DB.prepare('SELECT id, templates FROM subscriptions').all<{ id: number; templates: string }>()
+  for (const s of results) {
+    const m = JSON.parse(s.templates || '{}') as Record<string, unknown>
+    if (m[t.format] !== t.id) continue
+    delete m[t.format]
+    await c.env.DB.prepare('UPDATE subscriptions SET templates = ? WHERE id = ?').bind(JSON.stringify(m), s.id).run()
+  }
+  await c.env.DB.prepare('DELETE FROM templates WHERE id = ?').bind(t.id).run()
+  await audit(c.env, 'template.delete', t.name, FORMAT_LABELS[t.format as TemplateFormat])
+  return c.body(null, 204)
+})
+
 // ── settings and the audit log ───────────────────────────────────────────────
 app.get('/api/settings', async (c) => c.json({
   version: PANEL_VERSION,
@@ -563,18 +678,66 @@ app.get('/api/settings', async (c) => c.json({
   effective_panel_url: await panelUrl(c),
   sync_interval: syncInterval(c.env),
   token_key: (await getSetting(c.env, 'token_key')) && c.env.TOKEN_KEY === (await getSetting(c.env, 'token_key')) ? 'panel' : 'secret',
+  sni_engine: (await getSetting(c.env, 'sni_engine')) ?? 'netlas',
+  sni_key_set: !!(await getSetting(c.env, 'sni_key_enc')),
 }))
 
+const putSetting = (env: Env, key: string, value: string) =>
+  env.DB.prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(key, value).run()
+
+// Each setting changes only when it is sent: the panel address, and the
+// mapping engine for REALITY camouflage targets with its API key (kept
+// encrypted, sent to a server only with the search that needs it).
 app.put('/api/settings', async (c) => {
-  const body = await c.req.json<{ panel_url?: string }>().catch(() => null)
-  const url = (body?.panel_url ?? '').trim().replace(/\/+$/, '')
-  if (url && !/^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(url)) {
-    return c.json(fail('invalid', '面板地址：形如 https://psm.example.com', { errors: ['面板地址：形如 https://psm.example.com'] }), 400)
+  const body = await c.req.json<{ panel_url?: string; sni_engine?: string; sni_key?: string }>().catch(() => null)
+  if (!body) return c.json(fail('invalid', 'bad request'), 400)
+  const invalid = (m: string) => c.json(fail('invalid', m, { errors: [m] }), 400)
+  if (body.sni_engine !== undefined && !SNI_ENGINES.includes(body.sni_engine)) return invalid('网络测绘引擎：Netlas、Quake、ZoomEye 或 FOFA')
+  const key = body.sni_key?.trim()
+  if (key !== undefined && (key.length > 512 || /[\r\n]/.test(key))) return invalid('API Key 不正确')
+  if (body.panel_url !== undefined) {
+    const url = body.panel_url.trim().replace(/\/+$/, '')
+    if (url && !/^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(url)) return invalid('面板地址：形如 https://psm.example.com')
+    if (url) await putSetting(c.env, 'panel_url', url)
+    else await c.env.DB.prepare(`DELETE FROM settings WHERE key = 'panel_url'`).run()
+    await audit(c.env, 'settings.update', 'panel_url', url)
   }
-  if (url) await c.env.DB.prepare(`INSERT INTO settings (key, value) VALUES ('panel_url', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(url).run()
-  else await c.env.DB.prepare(`DELETE FROM settings WHERE key = 'panel_url'`).run()
-  await audit(c.env, 'settings.update', 'panel_url', url)
-  return c.json({ panel_url: url, effective_panel_url: await panelUrl(c) })
+  if (body.sni_engine !== undefined) {
+    await putSetting(c.env, 'sni_engine', body.sni_engine)
+    await audit(c.env, 'settings.update', 'sni_engine', body.sni_engine)
+  }
+  if (key !== undefined) {
+    if (key) await putSetting(c.env, 'sni_key_enc', await encrypt(c.env.TOKEN_KEY, key))
+    else await c.env.DB.prepare(`DELETE FROM settings WHERE key = 'sni_key_enc'`).run()
+    await audit(c.env, 'settings.update', 'sni_key', key ? '已更新' : '已清除')
+  }
+  return c.json({ panel_url: (await getSetting(c.env, 'panel_url')) ?? '', effective_panel_url: await panelUrl(c) })
+})
+
+// REALITY camouflage targets in a server's own network: the server searches
+// (psm sni find) with the saved engine and key; the page asks for the answer.
+app.post('/api/servers/:id/sni-find', async (c) => {
+  const s = await getServer(c.env, c.req.param('id'))
+  if (!s) return c.json(fail('not_found', '没有这台服务器'), 404)
+  if (!s.agent_token_hash) {
+    return c.json(fail('invalid', '服务器还没有接入面板', { errors: ['服务器还没有接入面板，接入后才能查询'] }), 400)
+  }
+  const keyEnc = await getSetting(c.env, 'sni_key_enc')
+  if (!keyEnc) return c.json(fail('invalid', '还没有网络测绘引擎', { errors: ['先在“系统设置”里填写网络测绘引擎的 API Key'] }), 400)
+  const engine = (await getSetting(c.env, 'sni_engine')) ?? 'netlas'
+  // psm-agent reads a task's settings from its "data" (as for node tasks)
+  const id = await enqueue(c.env, s.id, null, { kind: 'sni.find', data: { engine, key: await decrypt(c.env.TOKEN_KEY, keyEnc) } })
+  return c.json({ task_id: id }, 202)
+})
+
+app.get('/api/tasks/:id', async (c) => {
+  const id = c.req.param('id')
+  const t = /^\d+$/.test(id)
+    ? await c.env.DB.prepare('SELECT id, kind, status, error, result_enc FROM tasks WHERE id = ?').bind(Number(id)).first<{ id: number; kind: string; status: string; error: string | null; result_enc: string | null }>()
+    : null
+  if (!t) return c.json(fail('not_found', '没有这个任务'), 404)
+  return c.json({ id: t.id, kind: t.kind, status: t.status, error: t.error,
+    result: t.result_enc ? JSON.parse(await decrypt(c.env.TOKEN_KEY, t.result_enc)) : null })
 })
 
 app.get('/api/audit', async (c) => {
@@ -619,8 +782,20 @@ async function applyResult(env: Env, server: ServerRow, t: TaskRow, r: AgentResu
   const error = r.ok ? null : String(r.error ?? 'failed').slice(0, 500)
   const link = r.ok && typeof r.link === 'string' && r.link ? await encrypt(env.TOKEN_KEY, r.link.slice(0, 8192)) : null
   const outbound = r.ok && r.outbound && typeof r.outbound === 'object' ? await encrypt(env.TOKEN_KEY, JSON.stringify(r.outbound).slice(0, 16384)) : null
+  const clash = r.ok && r.clash && typeof r.clash === 'object' ? await encrypt(env.TOKEN_KEY, JSON.stringify(r.clash).slice(0, 16384)) : null
   const db = env.DB
   switch (t.kind) {
+    case 'agent.leave': {
+      if (!r.ok) {   // e.g. an agent too old for agent.leave: the server stays, with the reason
+        await db.prepare('UPDATE servers SET leaving = 0, leave_error = ? WHERE id = ?').bind(error, server.id).run()
+        return
+      }
+      const out = r.output as { failed?: unknown } | undefined
+      const failed = Array.isArray(out?.failed) ? out!.failed.map(String) : []
+      await db.prepare('DELETE FROM servers WHERE id = ?').bind(server.id).run()
+      await audit(env, 'server.left', server.name, failed.length ? `未能删除：${failed.join('；')}`.slice(0, 500) : '节点和 psm-agent 已卸载', 'agent')
+      return
+    }
     case 'status':
       if (r.ok && r.output) {
         const report = JSON.stringify(r.output)
@@ -631,14 +806,14 @@ async function applyResult(env: Env, server: ServerRow, t: TaskRow, r: AgentResu
       return
     case 'node.add': case 'standalone.install':
       if (!t.node_id) return
-      await db.prepare(`UPDATE nodes SET status = ?, last_error = ?, link_enc = COALESCE(?, link_enc), outbound_enc = COALESCE(?, outbound_enc) WHERE id = ?`)
-        .bind(r.ok ? 'applied' : 'failed', error, link, outbound, t.node_id).run()
+      await db.prepare(`UPDATE nodes SET status = ?, last_error = ?, link_enc = COALESCE(?, link_enc), outbound_enc = COALESCE(?, outbound_enc), clash_enc = COALESCE(?, clash_enc) WHERE id = ?`)
+        .bind(r.ok ? 'applied' : 'failed', error, link, outbound, clash, t.node_id).run()
       return
     case 'node.update':
       if (!t.node_id) return
       // a failed update leaves the node running as before (PSM rolls back)
-      await db.prepare(`UPDATE nodes SET status = 'applied', last_error = ?, link_enc = COALESCE(?, link_enc), outbound_enc = COALESCE(?, outbound_enc) WHERE id = ?`)
-        .bind(error ? `修改没有生效：${error}` : null, link, outbound, t.node_id).run()
+      await db.prepare(`UPDATE nodes SET status = 'applied', last_error = ?, link_enc = COALESCE(?, link_enc), outbound_enc = COALESCE(?, outbound_enc), clash_enc = COALESCE(?, clash_enc) WHERE id = ?`)
+        .bind(error ? `修改没有生效：${error}` : null, link, outbound, clash, t.node_id).run()
       return
     case 'node.delete': case 'standalone.remove':
       if (!t.node_id) return
@@ -646,9 +821,9 @@ async function applyResult(env: Env, server: ServerRow, t: TaskRow, r: AgentResu
       else await db.prepare(`UPDATE nodes SET status = 'applied', last_error = ? WHERE id = ?`).bind(error, t.node_id).run()
       return
     case 'node.export':
-      if (t.node_id && (link || outbound)) {
+      if (t.node_id && (link || outbound || clash)) {
         await db.prepare('UPDATE nodes SET link_enc = COALESCE(?, link_enc), outbound_enc = COALESCE(?, outbound_enc) WHERE id = ?')
-          .bind(link, outbound, t.node_id).run()
+          .bind(link, outbound, clash, t.node_id).run()
       }
       return
     case 'traffic.set': case 'traffic.reset': {
@@ -704,6 +879,12 @@ app.post('/api/agent/sync', async (c) => {
     if (!t) continue
     await c.env.DB.prepare(`UPDATE tasks SET status = ?, error = ?, finished_at = datetime('now') WHERE id = ?`)
       .bind(r.ok ? 'done' : 'failed', r.ok ? null : String(r.error ?? 'failed').slice(0, 500), t.id).run()
+    if (t.kind === 'sni.find') {
+      // the answer for the page that asked; the engine's key leaves the task
+      const result = r.ok && r.output ? await encrypt(c.env.TOKEN_KEY, JSON.stringify(r.output).slice(0, 65536)) : null
+      await c.env.DB.prepare('UPDATE tasks SET result_enc = ?, payload_enc = ? WHERE id = ?')
+        .bind(result, await encrypt(c.env.TOKEN_KEY, JSON.stringify({ kind: 'sni.find' })), t.id).run()
+    }
     await applyResult(c.env, server, t, r)
   }
   if (Array.isArray(body.traffic)) await applyTraffic(c.env, server, body.traffic)

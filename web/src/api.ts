@@ -20,8 +20,8 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
 }
 
 export type Server = {
-  id: number; name: string; status: 'pending' | 'online' | 'offline'
-  hostname: string | null; agent_version: string | null; psm_version: string | null
+  id: number; name: string; status: 'pending' | 'online' | 'offline' | 'leaving'
+  hostname: string | null; agent_version: string | null; psm_version: string | null; leave_error: string | null
   note: string; last_seen: string | null; created_at: string; status_at: string | null
   node_count: number; traffic_used: number
 }
@@ -38,6 +38,15 @@ export type PanelNode = {
 
 export type Subscription = {
   id: number; name: string; labels: string[]; url: string; last_used: string | null; created_at: string
+  /** format → one of the user's templates (absent: the built-in one) */
+  templates: Record<string, number>
+}
+
+export type Template = { id: number; name: string; format: string; body: string; created_at: string; updated_at: string | null }
+export type Templates = {
+  formats: Record<string, string>
+  builtin: { format: string; name: string; body: string }[]
+  custom: Template[]
 }
 
 export const GB = 1024 ** 3

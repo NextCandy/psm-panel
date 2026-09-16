@@ -19,6 +19,8 @@ export interface Field {
   /** only when another field has one of these values, e.g. { mode: ['xhttp', 'ws'] } */
   when?: Record<string, string[]>
   options?: { value: string; label: string }[]
+  /** a select whose value PSM wants as a number (its schema checks the type) */
+  numeric?: boolean
   default?: string | number | boolean
   placeholder?: string
   help?: string
@@ -54,10 +56,12 @@ export const ENGINE_LABELS: Record<Engine, string> = {
 
 // ── shared field groups ──────────────────────────────────────────────────────
 const cert = (engines: Engine[]): Field[] => [
-  { key: 'sni', label: '证书域名（SNI）', type: 'text', required: true, engines, placeholder: 'hk.example.com' },
-  { key: 'cert_path', label: '证书文件', type: 'text', required: true, engines, placeholder: '/etc/nginx/ssl/<域名>/fullchain.pem' },
-  { key: 'key_path', label: '私钥文件', type: 'text', required: true, engines, placeholder: '/etc/nginx/ssl/<域名>/privkey.pem' },
-  { key: 'insecure', label: '自签证书（客户端跳过校验）', type: 'bool', default: false, engines },
+  { key: 'sni', label: '证书域名（SNI）', type: 'text', engines, placeholder: '留空：自签证书，SNI 用 www.bing.com',
+    help: '服务器上已有这个域名的证书（/etc/nginx/ssl/<域名>/）就直接用；没有就由 PSM 自动签一张自签证书，客户端自动跳过校验' },
+  { key: 'cert_path', label: '证书文件', type: 'text', engines, placeholder: '留空自动（见上）', help: '自己的证书放在别处时才填，私钥文件也要填' },
+  { key: 'key_path', label: '私钥文件', type: 'text', engines, placeholder: '留空自动（见上）' },
+  { key: 'insecure', label: '证书不受信任（客户端跳过校验）', type: 'bool', default: false, engines,
+    help: '只在自己填的证书是自签证书时勾选；自动签的自签证书总是跳过校验' },
 ]
 const xrayDomain: Field = {
   key: 'domain', label: '域名', type: 'text', required: true, engines: ['xray'],
@@ -183,7 +187,7 @@ export const PROTOCOLS: Protocol[] = [
     variants: [{
       id: 'snell', label: 'Snell', psm: 'snell', engines: ['standalone', ...SB_MH], defaultEngine: 'standalone',
       fields: [
-        { key: 'version', label: 'Snell 版本', type: 'select', default: '5', options: [
+        { key: 'version', label: 'Snell 版本', type: 'select', numeric: true, default: '5', options: [
           { value: '4', label: 'v4（独立安装、mihomo）' }, { value: '5', label: 'v5' }, { value: '6', label: 'v6（独立安装、sing-box；上游仍是测试版）' }] },
         { key: 'psk', label: 'PSK', type: 'password', placeholder: '留空自动生成' },
       ],
@@ -197,6 +201,32 @@ export const PROTOCOLS: Protocol[] = [
     }],
   },
 ]
+
+// ── the exit: what of a core node's traffic leaves through WARP or the free
+// residential line (psm node … --exit, lib/exit_cli.sh); everything else goes
+// out directly. Standalone servers have no routing.
+const EXIT_COUNTRIES: [string, string][] = [
+  ['JP', '日本'], ['KR', '韩国'], ['US', '美国'], ['TH', '泰国'], ['VN', '越南'], ['ID', '印度尼西亚'],
+  ['RU', '俄罗斯'], ['DE', '德国'], ['GB', '英国'], ['FR', '法国'], ['CA', '加拿大'], ['AU', '澳大利亚'],
+]
+const EXIT_ON = ['warp', 'vpngate']
+export const EXIT_FIELDS: Field[] = [
+  { key: 'exit', label: '出口分流', type: 'select', default: 'none', engines: ALL_CORES, options: [
+    { value: 'none', label: '不分流（全部从服务器直连）' }, { value: 'warp', label: 'Cloudflare WARP' }, { value: 'vpngate', label: '免费家宽（VPNGate）' }],
+    help: '选中的流量从 WARP 或家宽 IP 出去，给看 IP 的服务（ChatGPT、Netflix 等）用；其余流量照常直连。WARP 第一次用时自动注册；家宽线路由志愿者提供，速度和稳定性不保证，断线时服务器会自动换一条。' },
+  { key: 'exit_sites', label: '分流范围', type: 'select', default: 'ai', engines: ALL_CORES, when: { exit: EXIT_ON }, options: [
+    { value: 'ai', label: 'AI（ChatGPT、Claude、Gemini）' },
+    { value: 'streaming', label: '流媒体（Netflix、Disney+、HBO、Prime Video、Spotify）' },
+    { value: 'ai,streaming', label: 'AI + 流媒体' },
+    { value: 'all', label: '这个节点的全部流量' },
+    { value: 'custom', label: '自定义 geosite 列表' }] },
+  { key: 'exit_geosite', label: 'geosite 列表', type: 'text', required: true, engines: ALL_CORES, when: { exit: EXIT_ON, exit_sites: ['custom'] },
+    placeholder: 'openai,netflix,youtube', pattern: '^[a-z0-9!@._-]+(,[a-z0-9!@._-]+)*$', help: '逗号分隔的 geosite 名称（v2fly domain-list-community 里的名字）' },
+  { key: 'exit_country', label: '家宽国家', type: 'select', default: 'JP', engines: ALL_CORES, when: { exit: ['vpngate'] },
+    options: EXIT_COUNTRIES.map(([value, label]) => ({ value, label: `${label}（${value}）` })),
+    help: '服务器第一次建家宽出口时找这个国家的家宽线路；已经有家宽线路时继续用它。' },
+]
+for (const p of PROTOCOLS) for (const v of p.variants) if (v.engines.some((e) => e !== 'standalone')) v.fields.push(...EXIT_FIELDS)
 
 /** Snell versions each engine can run. */
 export const SNELL_VERSIONS: Partial<Record<Engine, string[]>> = {
@@ -276,8 +306,11 @@ export function validateNode(n: NodeInput):
       errors.push(`${f.label}：${f.min}-${f.max}`)
     if (f.type === 'select' && !f.options?.some((o) => o.value === String(val))) errors.push(`${f.label}：无效的选项`)
     if (f.pattern && !new RegExp(f.pattern).test(String(val))) errors.push(`${f.label}：格式不正确`)
-    data[f.key] = f.type === 'number' ? Number(val) : f.type === 'bool' ? (val === true || val === 'true' ? 1 : 0) : val
+    data[f.key] = f.type === 'number' || f.numeric ? Number(val) : f.type === 'bool' ? (val === true || val === 'true' ? 1 : 0) : val
   }
+  // a custom exit scope is the geosite list itself (PSM's exit_sites takes names)
+  if (data.exit_sites === 'custom') data.exit_sites = data.exit_geosite
+  delete data.exit_geosite
   if (v.psm === 'snell' && !(SNELL_VERSIONS[n.engine] ?? []).includes(String(data.version)))
     errors.push(`Snell v${data.version} 不能用 ${ENGINE_LABELS[n.engine]} 运行`)
   if (v.id === 'vless-tls') {
