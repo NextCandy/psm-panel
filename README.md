@@ -2,7 +2,7 @@
 
 # PSM Panel
 
-[PSM](https://github.com/jinqians/proxy-stack) 的网页管理面板（参考 Xboard）：在一个网页里管理多台 VPS 的节点、安装、状态和流量，并把所有节点汇总成一个订阅。
+[PSM](https://github.com/jinqians/proxy-stack) 的网页管理面板：在一个网页里管理多台 VPS 的节点、安装、状态和流量，并把所有节点汇总成一个订阅。
 
 - **一键部署到 Cloudflare**：后端和页面运行在 Cloudflare Workers 上，数据存 D1，免费额度就够用；只需要填一个管理员密码。
 - **VPS 不开放任何端口**：每台 VPS 上的 psm-agent 主动用 HTTPS 连面板，领取任务、回报结果；不需要子域名、Tunnel 或防火墙规则。
@@ -14,18 +14,21 @@
 - **订阅**：一个地址汇总所有服务器的节点，可按标签筛选；通用链接、Clash / mihomo、Stash、sing-box、Surge、Quantumult X、Loon，按客户端自动识别。每种格式都有带基础分流（广告拦截、AI、流媒体、国内直连）的内置模板，也可以复制一份改成自己的模板。
 - **诊断和记录**：一键收集服务器的 PSM 版本、内核、`psm doctor` 结果；所有操作都有记录。
 
-完整的部署和使用文档：**https://jinqians.github.io/psm-panel-docs/**
+完整的部署和使用文档：**https://psm-panel-docs.pages.dev/**
 
 ## 一键部署
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jinqians/psm-panel)
 
-1. 点上面的按钮，登录 Cloudflare（没有账号就免费注册一个）。
-2. 按提示连接 GitHub：Cloudflare 会把这个仓库复制一份到你的 GitHub 账号（相当于 fork），以后往那个仓库推送会自动重新部署。
-3. 表单里只需要填 **ADMIN_PASSWORD**（后台登录密码，至少 8 位），其余保持默认，点"部署"。D1 数据库自动创建，数据表由面板第一次运行时自己建好，不需要执行任何命令，也不需要 API Token。
-4. 部署完成后打开 `https://psm-panel.<你的子域>.workers.dev`，用刚才的密码登录。
+1. **先 fork**：打开 [jinqians/psm-panel](https://github.com/jinqians/psm-panel) 点 **Fork**，把仓库复制到你自己的 GitHub 账号下（Cloudflare 需要一个你账号下的仓库来连接并自动部署，直接点本仓库的按钮走不完流程）。
+2. 打开 `https://deploy.workers.cloudflare.com/?url=https://github.com/<你的GitHub用户名>/psm-panel`（把用户名换成你的），登录 Cloudflare（没有账号就免费注册一个）。
+3. 按提示连接 GitHub，授权 Cloudflare 访问你 fork 的这个仓库。
+4. 表单里只需要填 **ADMIN_PASSWORD**（后台登录密码，至少 8 位），其余保持默认，点"部署"。D1 数据库自动创建，数据表由面板第一次运行时自己建好，不需要执行任何命令，也不需要 API Token。
+5. 部署完成后打开 `https://psm-panel.<你的子域>.workers.dev`，用刚才的密码登录。
 
-**已经 fork 了这个仓库**：在 Cloudflare 控制台打开 [Workers 和 Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages) → 创建 → 导入仓库，选中你的 fork；部署后在这个 Worker 的"设置 → 变量和机密"里添加机密 `ADMIN_PASSWORD`。
+**也可以在控制台导入**：[Workers 和 Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages) → 创建 → 导入仓库，选中你的 fork；部署后在这个 Worker 的"设置 → 变量和机密"里添加机密 `ADMIN_PASSWORD`。
+
+以后把上游的更新合并到你的 fork，推送后会自动重新部署；新增的数据表由面板自己建好。
 
 **用自己的域名**：在 Worker 的"设置 → 域和路由"添加自定义域，再在面板"系统设置"里把面板地址改成它。
 

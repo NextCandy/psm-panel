@@ -393,8 +393,8 @@ const SINGBOX = `{
     ],
     "rule_set": [
 ${['category-ads-all', 'openai', 'anthropic', 'google-gemini', 'netflix', 'disney', 'youtube', 'cn'].map((s) =>
-  `      { "type": "remote", "tag": "geosite-${s}", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${s}.srs", "download_detour": "PSM" }`).join(',\n')},
-      { "type": "remote", "tag": "geoip-cn", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs", "download_detour": "PSM" }
+  `      { "type": "remote", "tag": "geosite-${s}", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${s}.srs", "http_client": { "detour": "PSM" } }`).join(',\n')},
+      { "type": "remote", "tag": "geoip-cn", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs", "http_client": { "detour": "PSM" } }
     ],
     "final": "PSM",
     "default_domain_resolver": "local",
