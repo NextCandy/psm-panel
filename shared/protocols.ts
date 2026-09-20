@@ -213,7 +213,7 @@ const EXIT_ON = ['warp', 'vpngate']
 export const EXIT_FIELDS: Field[] = [
   { key: 'exit', label: '出口分流', type: 'select', default: 'none', engines: ALL_CORES, options: [
     { value: 'none', label: '不分流（全部从服务器直连）' }, { value: 'warp', label: 'Cloudflare WARP' }, { value: 'vpngate', label: '免费家宽（VPNGate）' }],
-    help: '选中的流量从 WARP 或家宽 IP 出去，给看 IP 的服务（ChatGPT、Netflix 等）用；其余流量照常直连。WARP 第一次用时自动注册；家宽线路由志愿者提供，速度和稳定性不保证，断线时服务器会自动换一条。' },
+    help: '选中的流量从 WARP 或家宽 IP 出去，给看 IP 的服务（ChatGPT、Netflix 等）用；其余流量照常直连。WARP 第一次用时自动注册，任何服务器都能用。家宽线路由志愿者提供，速度和稳定性不保证，断线时服务器会自动换一条；它走 OpenVPN，需要服务器有 /dev/net/tun——LXC / OpenVZ 的小鸡常常没有（服务器页的诊断里会写明），这类机器请改用 WARP。' },
   { key: 'exit_sites', label: '分流范围', type: 'select', default: 'ai', engines: ALL_CORES, when: { exit: EXIT_ON }, options: [
     { value: 'ai', label: 'AI（ChatGPT、Claude、Gemini）' },
     { value: 'streaming', label: '流媒体（Netflix、Disney+、HBO、Prime Video、Spotify）' },
