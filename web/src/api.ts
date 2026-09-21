@@ -36,6 +36,18 @@ export type PanelNode = {
   traffic_used: number; traffic_paused: boolean; traffic_at: string | null; reset_day: number
 }
 
+/**
+ * One realm rule on the entry server, forwarding a port of it to somewhere
+ * else. `remote_server_id` is set when the landing side is a server in the
+ * panel too (so both ends can be named); `remote_host` is always the address
+ * the entry server dials.
+ */
+export type Relay = {
+  id: number; server_id: number; name: string; listen_port: number; remote_host: string; remote_port: number
+  remote_server_id: number | null; udp: boolean; tls: boolean; tls_sni: string; tls_insecure: boolean
+  status: NodeStatus; last_error: string | null; created_at: string
+}
+
 export type Subscription = {
   id: number; name: string; labels: string[]; url: string; last_used: string | null; created_at: string
   /** format → one of the user's templates (absent: the built-in one) */

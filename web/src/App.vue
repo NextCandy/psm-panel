@@ -5,6 +5,7 @@ import Login from './components/Login.vue'
 import Dashboard from './views/Dashboard.vue'
 import Nodes from './views/Nodes.vue'
 import Servers from './views/Servers.vue'
+import Relays from './views/Relays.vue'
 import Traffic from './views/Traffic.vue'
 import Subscriptions from './views/Subscriptions.vue'
 import Settings from './views/Settings.vue'
@@ -14,6 +15,7 @@ const pages = [
   { id: 'dashboard', label: '仪表盘', icon: '▦', component: Dashboard },
   { id: 'nodes', label: '节点管理', icon: '◉', component: Nodes },
   { id: 'servers', label: '服务器', icon: '▤', component: Servers },
+  { id: 'relays', label: '中转', icon: '⇄', component: Relays },
   { id: 'traffic', label: '流量', icon: '⇅', component: Traffic },
   { id: 'subscriptions', label: '订阅', icon: '⎘', component: Subscriptions },
   { id: 'settings', label: '系统设置', icon: '⚙', component: Settings },

@@ -43,7 +43,12 @@ type NodeRow = {
   status: string; last_error: string | null; created_at: string
   traffic_used: number; traffic_paused: number; traffic_at: string | null; reset_day: number
 }
-type TaskRow = { id: number; server_id: number; node_id: number | null; kind: string; payload_enc: string; status: string }
+type RelayRow = {
+  id: number; server_id: number; name: string; listen_port: number; remote_host: string; remote_port: number
+  remote_server_id: number | null; udp: number; tls: number; tls_sni: string; tls_insecure: number
+  status: string; last_error: string | null; created_at: string
+}
+type TaskRow = { id: number; server_id: number; node_id: number | null; relay_id: number | null; kind: string; payload_enc: string; status: string }
 type AgentResult = { task_id: number; ok: boolean; link?: string; outbound?: unknown; clash?: unknown; error?: string; output?: unknown }
 type TrafficEntry = { tag?: unknown; used_bytes?: unknown; paused?: unknown }
 type C = Context<{ Bindings: Env }>
@@ -131,9 +136,9 @@ async function getNode(env: Env, id: string | number): Promise<NodeRow | null> {
   return env.DB.prepare('SELECT * FROM nodes WHERE id = ?').bind(Number(id)).first<NodeRow>()
 }
 
-async function enqueue(env: Env, serverId: number, nodeId: number | null, task: Record<string, unknown>): Promise<number> {
-  const r = await env.DB.prepare('INSERT INTO tasks (server_id, node_id, kind, payload_enc) VALUES (?, ?, ?, ?)')
-    .bind(serverId, nodeId, task.kind as string, await encrypt(env.TOKEN_KEY, JSON.stringify(task))).run()
+async function enqueue(env: Env, serverId: number, nodeId: number | null, task: Record<string, unknown>, relayId: number | null = null): Promise<number> {
+  const r = await env.DB.prepare('INSERT INTO tasks (server_id, node_id, relay_id, kind, payload_enc) VALUES (?, ?, ?, ?, ?)')
+    .bind(serverId, nodeId, relayId, task.kind as string, await encrypt(env.TOKEN_KEY, JSON.stringify(task))).run()
   return Number(r.meta.last_row_id)
 }
 
@@ -494,6 +499,182 @@ app.post('/api/nodes/:id/traffic/reset', async (c) => {
   return c.json({ status: 'queued' }, 202)
 })
 
+// ── relays ───────────────────────────────────────────────────────────────────
+// A relay is one realm rule on the entry server: it forwards one of that
+// server's ports to another host. The landing side may be another server in the
+// panel — remote_server_id pairs the two so the hop can be shown end to end —
+// or any address at all, so remote_host is always what the entry server dials.
+// The hop can be wrapped in TLS; the certificate stays on the server, and only
+// the name and whether a self-signed one is accepted are kept here.
+const RELAY_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/   // psm-agent's tagRe
+const RELAY_HOST_RE = /^([A-Za-z0-9-]{1,63}\.)*[A-Za-z0-9-]{1,63}$|^[0-9a-fA-F:.]+$/
+
+type RelayInput = {
+  server_id?: number; name?: string; listen_port?: number; remote_host?: string; remote_port?: number
+  remote_server_id?: number | null; udp?: boolean; tls?: boolean; tls_sni?: string; tls_insecure?: boolean
+}
+
+async function getRelay(env: Env, id: string | number): Promise<RelayRow | null> {
+  if (!/^\d+$/.test(String(id))) return null
+  return env.DB.prepare('SELECT * FROM relays WHERE id = ?').bind(Number(id)).first<RelayRow>()
+}
+
+const publicRelay = (r: RelayRow) => ({ ...r, udp: !!r.udp, tls: !!r.tls, tls_insecure: !!r.tls_insecure })
+
+/** The rule as `psm relay add|update --input -` takes it on stdin. */
+const relayData = (r: RelayRow) => ({
+  tag: r.name, listen_port: r.listen_port, remote_host: r.remote_host, remote_port: r.remote_port,
+  udp: !!r.udp, tls: !!r.tls, tls_sni: r.tls_sni, tls_insecure: !!r.tls_insecure,
+})
+
+const goodRelayPort = (v: unknown) => Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 65535
+
+/** Checks a relay as it will be stored; `old` supplies whatever a change leaves out. */
+function validateRelay(b: RelayInput, old?: RelayRow): string[] {
+  const errors: string[] = []
+  const name = b.name ?? old?.name
+  const host = (b.remote_host ?? old?.remote_host ?? '').trim()
+  const sni = (b.tls_sni ?? old?.tls_sni ?? '').trim()
+  if (!name || !RELAY_NAME_RE.test(name)) errors.push('中转名称：字母、数字、. _ - ，48 字以内')
+  if (!goodRelayPort(b.listen_port ?? old?.listen_port)) errors.push('监听端口：1-65535')
+  if (!goodRelayPort(b.remote_port ?? old?.remote_port)) errors.push('落地端口：1-65535')
+  if (!host || host.length > 253 || !RELAY_HOST_RE.test(host)) errors.push('落地地址：域名或 IP')
+  // realm reads its transport as a ";"-separated list of "key=value", and it
+  // panics on an option it cannot parse: neither character may reach it
+  if (sni && (sni.length > 253 || /[;=\s]/.test(sni))) errors.push('TLS 域名：不能包含空格、; 或 =')
+  return errors
+}
+
+const queueRelay = (env: Env, r: RelayRow, kind: 'add' | 'update') =>
+  enqueue(env, r.server_id, null, { kind: `relay.${kind}`, tag: r.name, data: relayData(r) }, r.id)
+
+app.get('/api/relays', async (c) => {
+  const sid = new URL(c.req.url).searchParams.get('server_id')
+  const stmt = sid && /^\d+$/.test(sid)
+    ? c.env.DB.prepare('SELECT * FROM relays WHERE server_id = ? ORDER BY id').bind(Number(sid))
+    : c.env.DB.prepare('SELECT * FROM relays ORDER BY id')
+  const { results } = await stmt.all<RelayRow>()
+  return c.json(results.map(publicRelay))
+})
+
+// Create a relay on the entry server. A server that has joined gets it through
+// its agent (realm is installed there on first use); otherwise it waits.
+app.post('/api/relays', async (c) => {
+  const body = await c.req.json<RelayInput>().catch(() => null)
+  if (!body) return c.json(fail('bad_body', 'the body must be a JSON object'), 400)
+  const server = await getServer(c.env, body.server_id ?? '')
+  if (!server) return c.json(fail('bad_server', '选择入口服务器'), 400)
+  let landingId: number | null = null
+  if (body.remote_server_id) {
+    const landing = await getServer(c.env, body.remote_server_id)
+    if (!landing) return c.json(fail('bad_server', '落地服务器不存在'), 400)
+    if (landing.id === server.id) {
+      const msg = '入口和落地不能是同一台服务器'
+      return c.json(fail('invalid', msg, { errors: [msg] }), 400)
+    }
+    landingId = landing.id
+  }
+  const errors = validateRelay(body)
+  if (errors.length) return c.json(fail('invalid', errors.join('；'), { errors }), 400)
+  const host = body.remote_host!.trim()
+  const joined = !!server.agent_token_hash
+  const status = joined ? 'queued' : 'waiting'
+  // encryption on with no name given: the hop is verified against the host
+  const sni = (body.tls_sni ?? '').trim() || (body.tls ? host : '')
+
+  let id: number
+  try {
+    const r = await c.env.DB.prepare(
+      `INSERT INTO relays (server_id, name, listen_port, remote_host, remote_port, remote_server_id, udp, tls, tls_sni, tls_insecure, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(server.id, body.name, body.listen_port, host, body.remote_port, landingId,
+        body.udp ? 1 : 0, body.tls ? 1 : 0, sni, body.tls_insecure ? 1 : 0, status)
+      .run()
+    id = Number(r.meta.last_row_id)
+  } catch (e) {
+    if (String(e).includes('UNIQUE')) {
+      const msg = `${server.name} 上已有同名中转，或这个监听端口已被另一条中转占用`
+      return c.json(fail('exists', msg, { errors: [msg] }), 409)
+    }
+    throw e
+  }
+  if (status === 'queued') await queueRelay(c.env, (await getRelay(c.env, id))!, 'add')
+  await audit(c.env, 'relay.add', `${server.name}/${body.name}`, `${body.listen_port} → ${host}:${body.remote_port}`)
+  const install_command = joined ? undefined : await installCommand(c, await newJoinToken(c.env, server.id))
+  return c.json({ id, status, joined, install_command }, 201)
+})
+
+// Edit a relay: its ports, the far side and the encryption. Its name and its
+// entry server stay — realm keys a rule by its tag, so a rename is a new rule.
+app.patch('/api/relays/:id', async (c) => {
+  const old = await getRelay(c.env, c.req.param('id'))
+  if (!old) return c.json(fail('not_found', 'no such relay'), 404)
+  if (old.status === 'queued' || old.status === 'deleting') return c.json(fail('busy', '中转正在下发或删除，稍后再改'), 409)
+  const body = await c.req.json<RelayInput>().catch(() => null)
+  if (!body) return c.json(fail('bad_body', 'the body must be a JSON object'), 400)
+  let landingId = old.remote_server_id
+  if (body.remote_server_id !== undefined) {
+    landingId = null
+    if (body.remote_server_id) {
+      const landing = await getServer(c.env, body.remote_server_id)
+      if (!landing) return c.json(fail('bad_server', '落地服务器不存在'), 400)
+      if (landing.id === old.server_id) {
+        const msg = '入口和落地不能是同一台服务器'
+        return c.json(fail('invalid', msg, { errors: [msg] }), 400)
+      }
+      landingId = landing.id
+    }
+  }
+  const errors = validateRelay(body, old)
+  if (errors.length) return c.json(fail('invalid', errors.join('；'), { errors }), 400)
+  const host = (body.remote_host ?? old.remote_host).trim()
+  const tls = body.tls ?? !!old.tls
+  const sni = (body.tls_sni ?? old.tls_sni).trim() || (tls ? host : '')
+  const server = (await getServer(c.env, old.server_id))!
+  const onServer = old.status === 'applied'
+  const status = server.agent_token_hash && (onServer || old.status === 'failed') ? 'queued' : old.status
+  try {
+    await c.env.DB.prepare(
+      `UPDATE relays SET listen_port = ?, remote_host = ?, remote_port = ?, remote_server_id = ?, udp = ?, tls = ?,
+              tls_sni = ?, tls_insecure = ?, status = ?, last_error = NULL WHERE id = ?`)
+      .bind(body.listen_port ?? old.listen_port, host, body.remote_port ?? old.remote_port, landingId,
+        (body.udp ?? !!old.udp) ? 1 : 0, tls ? 1 : 0, sni, (body.tls_insecure ?? !!old.tls_insecure) ? 1 : 0,
+        status, old.id).run()
+  } catch (e) {
+    if (String(e).includes('UNIQUE')) {
+      const msg = `${server.name} 上这个监听端口已被另一条中转占用`
+      return c.json(fail('exists', msg, { errors: [msg] }), 409)
+    }
+    throw e
+  }
+  const updated = (await getRelay(c.env, old.id))!
+  if (status === 'queued') await queueRelay(c.env, updated, onServer ? 'update' : 'add')
+  await audit(c.env, 'relay.update', `${server.name}/${old.name}`)
+  return c.json(publicRelay(updated))
+})
+
+// Delete a relay: one that is running is removed from its server first (202);
+// one that never got there goes at once (204).
+app.delete('/api/relays/:id', async (c) => {
+  const r = await getRelay(c.env, c.req.param('id'))
+  if (!r) return c.json(fail('not_found', 'no such relay'), 404)
+  const server = await getServer(c.env, r.server_id)
+  if (r.status === 'applied' || r.status === 'deleting') {
+    if (r.status === 'applied') {
+      await enqueue(c.env, r.server_id, null, { kind: 'relay.delete', tag: r.name }, r.id)
+      await c.env.DB.prepare(`UPDATE relays SET status = 'deleting' WHERE id = ?`).bind(r.id).run()
+      await audit(c.env, 'relay.delete', `${server?.name}/${r.name}`)
+    }
+    return c.json({ status: 'deleting' }, 202)
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare(`DELETE FROM tasks WHERE relay_id = ? AND status = 'queued'`).bind(r.id),
+    c.env.DB.prepare('DELETE FROM relays WHERE id = ?').bind(r.id),
+  ])
+  await audit(c.env, 'relay.delete', `${server?.name}/${r.name}`)
+  return c.body(null, 204)
+})
+
 // ── subscriptions ────────────────────────────────────────────────────────────
 type SubRow = { id: number; name: string; labels: string; token_hash: string; token_enc: string; last_used: string | null; created_at: string; templates: string }
 
@@ -819,6 +1000,22 @@ async function applyResult(env: Env, server: ServerRow, t: TaskRow, r: AgentResu
       if (!t.node_id) return
       if (r.ok) await db.prepare('DELETE FROM nodes WHERE id = ?').bind(t.node_id).run()
       else await db.prepare(`UPDATE nodes SET status = 'applied', last_error = ? WHERE id = ?`).bind(error, t.node_id).run()
+      return
+    case 'relay.add':
+      if (!t.relay_id) return
+      await db.prepare('UPDATE relays SET status = ?, last_error = ? WHERE id = ?')
+        .bind(r.ok ? 'applied' : 'failed', error, t.relay_id).run()
+      return
+    case 'relay.update':
+      if (!t.relay_id) return
+      // a rule realm would not take is rolled back by PSM: the old hop runs on
+      await db.prepare(`UPDATE relays SET status = 'applied', last_error = ? WHERE id = ?`)
+        .bind(error ? `修改没有生效：${error}` : null, t.relay_id).run()
+      return
+    case 'relay.delete':
+      if (!t.relay_id) return
+      if (r.ok) await db.prepare('DELETE FROM relays WHERE id = ?').bind(t.relay_id).run()
+      else await db.prepare(`UPDATE relays SET status = 'applied', last_error = ? WHERE id = ?`).bind(error, t.relay_id).run()
       return
     case 'node.export':
       if (t.node_id && (link || outbound || clash)) {
