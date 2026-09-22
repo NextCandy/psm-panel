@@ -93,7 +93,7 @@ const statusText = { online: '在线', pending: '待接入', offline: '离线', 
 
 <template>
   <div class="page-head">
-    <div><h1>服务器</h1><p>接入面板的 VPS。在 VPS 上执行一键安装命令后，psm-agent 会主动连接面板，不开放任何端口。没装过 PSM 的服务器也可以直接执行，命令会先装好 PSM。</p></div>
+    <div><h1>服务器</h1></div>
     <form class="cmd" style="min-width: 360px" @submit.prevent="add">
       <input v-model="name" class="input" placeholder="新服务器名称，例如 hk1" data-test="server-name">
       <button class="btn primary" type="submit" data-test="add-server">添加服务器</button>

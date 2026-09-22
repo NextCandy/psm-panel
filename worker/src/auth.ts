@@ -23,6 +23,8 @@ const enc = new TextEncoder()
 
 /** This isolate's stored record; `null` once looked for and not found. */
 let stored: string | null | undefined
+/** The secret already checked against `stored`, so the check runs once. */
+let checkedSecret: string | undefined
 
 function b64url(buf: ArrayBuffer): string {
   return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -57,17 +59,25 @@ async function recordMatches(record: string, password: string): Promise<boolean>
  * time it is seen, and again whenever it was changed. Once per isolate.
  */
 export async function syncAdminPassword(env: Env): Promise<void> {
+  const secret = env.ADMIN_PASSWORD ?? ''
+  // Checking the secret against the record is a PBKDF2 pass: a hundred
+  // milliseconds and more. This runs from the middleware every request takes,
+  // so it has to happen once per isolate — not once per click.
+  if (stored !== undefined && (secret.length < 8 || secret === checkedSecret)) return
   if (stored === undefined) {
     const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind(PW_SETTING).first<{ value: string }>()
     stored = row?.value ?? null
   }
-  const secret = env.ADMIN_PASSWORD ?? ''
   if (secret.length < 8) return
-  if (stored && (await recordMatches(stored, secret))) return
+  if (stored && (await recordMatches(stored, secret))) {
+    checkedSecret = secret
+    return
+  }
   const record = await makeRecord(secret)
   await env.DB.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
     .bind(PW_SETTING, record).run()
   stored = record
+  checkedSecret = secret
 }
 
 export const adminConfigured = (env: Env) => (env.ADMIN_PASSWORD ?? '').length >= 8 || !!stored

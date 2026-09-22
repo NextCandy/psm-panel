@@ -108,7 +108,7 @@ async function removeTemplate(t: Template) {
 
 <template>
   <div class="page-head">
-    <div><h1>订阅</h1><p>把所有服务器上运行中的节点汇总成一个订阅地址（可按节点标签筛选）。超额暂停的节点不会出现在订阅里。</p></div>
+    <div><h1>订阅</h1></div>
   </div>
   <form class="card" style="padding: 16px; margin-bottom: 16px" @submit.prevent="create">
     <div class="row2">

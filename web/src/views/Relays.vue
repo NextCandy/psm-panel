@@ -134,7 +134,7 @@ function openEdit(r: Relay) {
 
 <template>
   <div class="page-head">
-    <div><h1>中转</h1><p>把入口服务器的一个端口转发到落地服务器或任意地址，可选对这一跳加密。</p></div>
+    <div><h1>中转</h1></div>
     <button class="btn primary" data-test="new-relay" @click="openNew">＋ 新建中转</button>
   </div>
   <div v-if="message" class="notice warn" data-test="message">{{ message }}</div>

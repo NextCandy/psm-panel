@@ -57,7 +57,7 @@ function openEdit(n: PanelNode) {
 
 <template>
   <div class="page-head">
-    <div><h1>节点管理</h1><p>管理所有节点，包括添加、修改、删除、查看链接等操作。</p></div>
+    <div><h1>节点管理</h1></div>
     <button class="btn primary" data-test="new-node" @click="openNew">＋ 新建节点</button>
   </div>
   <div v-if="message" class="notice warn" data-test="message">{{ message }}</div>

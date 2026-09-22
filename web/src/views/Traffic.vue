@@ -57,7 +57,7 @@ async function reset(n: Row) {
 
 <template>
   <div class="page-head">
-    <div><h1>流量</h1><p>各节点本月流量（按重置日清零）和最近 30 天的每日流量。超出上限的节点由服务器自动暂停，直到重置。</p></div>
+    <div><h1>流量</h1></div>
     <button class="btn" :disabled="refreshing" data-test="traffic-refresh" @click="refresh">{{ refreshing ? '正在向服务器获取…' : '立即刷新' }}</button>
   </div>
   <div v-if="message" class="notice ok">{{ message }}</div>

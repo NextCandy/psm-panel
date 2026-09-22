@@ -29,7 +29,7 @@ async function load() {
   settings.value = await api<Settings>('/api/settings')
   panelUrl.value = settings.value.panel_url
   sniEngine.value = settings.value.sni_engine || 'netlas'
-  log.value = await api<Entry[]>('/api/audit?limit=100')
+  log.value = await api<Entry[]>('/api/audit?limit=5')
 }
 
 async function saveSni() {
@@ -61,7 +61,7 @@ async function save() {
 
 <template>
   <div class="page-head">
-    <div><h1>系统设置</h1><p>面板地址、运行信息和操作记录。</p></div>
+    <div><h1>系统设置</h1></div>
   </div>
   <div v-if="settings" class="card" style="padding: 18px; margin-bottom: 16px">
     <form class="field" @submit.prevent="save">
@@ -70,15 +70,11 @@ async function save() {
         <input v-model="panelUrl" class="input" :placeholder="settings.effective_panel_url" data-test="panel-url">
         <button class="btn primary" type="submit" data-test="save-settings">保存</button>
       </div>
-      <div class="help">服务器安装命令和订阅地址里的面板地址。绑定了自己的域名后填在这里；留空则用当前访问的地址（{{ settings.effective_panel_url }}）。</div>
     </form>
     <div v-if="message" class="notice ok">{{ message }}</div>
     <div v-if="error" class="notice err">{{ error }}</div>
     <dl class="facts">
       <dt>面板版本</dt><dd data-test="panel-version">{{ settings.version }}</dd>
-      <dt>服务器同步间隔</dt><dd>空闲时 {{ settings.sync_interval }} 秒，有任务时 3 秒（Worker 变量 SYNC_INTERVAL）</dd>
-      <dt>数据加密密钥</dt><dd>{{ settings.token_key === 'secret' ? 'Worker 机密 TOKEN_KEY' : '面板自动生成（存于 D1）' }}</dd>
-      <dt>管理员密码</dt><dd>在 Cloudflare 控制台打开这个 Worker 的“设置 → 变量和机密”，修改<strong>机密</strong> ADMIN_PASSWORD；改后所有已登录的会话失效。面板第一次读到这个机密时会把它的加盐哈希记在 D1 里，所以之后重新部署即使机密丢了也仍能登录（机密还在时以机密为准）。注意别用“变量”：明文变量会在每次部署时被清掉。</dd>
     </dl>
   </div>
   <div v-if="settings" class="card" style="padding: 18px; margin-bottom: 16px">
@@ -93,7 +89,6 @@ async function save() {
           :placeholder="settings.sni_key_set ? '已保存 API Key（留空不修改）' : 'API Key'">
         <button class="btn primary" type="submit" data-test="save-sni">保存</button>
       </div>
-      <div class="help">新建 REALITY 节点时，面板让那台服务器用这个引擎查同一个 ASN 里有证书的网站，逐个做 TLS 握手检查，列出可用的伪装域名和目标，点一下填入。API Key 加密存放，只在查询时发给那台服务器。Netlas 有免费额度：在 app.netlas.io 注册后，从个人资料页复制 API Key。</div>
     </form>
     <div v-if="sniMessage" class="notice ok" data-test="sni-saved">{{ sniMessage }}</div>
   </div>
