@@ -833,7 +833,10 @@ function templateProblem(format: string, name: string, body: string): string | n
   if (!(TEMPLATE_FORMATS as string[]).includes(format)) return '格式：Clash、Stash、sing-box、Surge、Quantumult X 或 Loon'
   if (!name.trim() || name.trim().length > 48) return '模板名称：1-48 个字符'
   if (!body.trim() || body.length > 64 * 1024) return '模板内容：不能为空，最多 64 KB'
-  if (!/^[ \t]*\{\{proxies\}\}[ \t]*$/m.test(body)) return '模板里要有单独占一行的 {{proxies}}，节点写在那里'
+  // Clash can take its nodes from the proxy-provider instead, and then there is
+  // no {{proxies}} line to fill in — the built-in Clash template works that way.
+  if (!/\{\{provider_url\}\}/.test(body) && !/^[ \t]*\{\{proxies\}\}[ \t]*$/m.test(body))
+    return '模板里要有单独占一行的 {{proxies}}（节点写在那里），或者用 {{provider_url}} 让 Clash 自己从订阅拉取节点'
   return null
 }
 

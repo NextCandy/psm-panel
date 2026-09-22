@@ -264,39 +264,36 @@ allow-lan: false
 mode: rule
 log-level: info
 
+# the nodes come from the provider alone, so a node added or removed in the
+# panel reaches this profile by itself, within the hour
 proxy-providers:
   psm:
     type: http
     url: {{provider_url}}
     interval: 3600
     path: ./psm-panel.yaml
-    exclude-filter: {{provider_exclude}}
     health-check:
       enable: true
       url: http://www.gstatic.com/generate_204
       interval: 300
 
-proxies:
-  {{proxies}}
-
 proxy-groups:
   - name: PSM
     type: select
-    proxies: [自动选择, {{names}}DIRECT]
+    proxies: [自动选择, DIRECT]
     use: [psm]
   - name: 自动选择
     type: url-test
     url: http://www.gstatic.com/generate_204
     interval: 300
-    proxies: [{{names_list}}]
     use: [psm]
   - name: AI
     type: select
-    proxies: [PSM, {{names}}DIRECT]
+    proxies: [PSM, DIRECT]
     use: [psm]
   - name: 流媒体
     type: select
-    proxies: [PSM, {{names}}DIRECT]
+    proxies: [PSM, DIRECT]
     use: [psm]
 
 rules:

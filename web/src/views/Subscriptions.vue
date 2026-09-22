@@ -178,7 +178,7 @@ async function removeTemplate(t: Template) {
   <div v-if="editor.open" class="overlay" @click.self="editor.open = false">
     <div class="dialog" role="dialog" aria-label="订阅模板" style="max-width: 860px">
       <div class="dialog-head"><div><h2>{{ editing ? `编辑模板 ${editor.name}` : '新建订阅模板' }}</h2>
-        <p>节点写在单独一行的 <code v-pre>{{proxies}}</code> 处；<code v-pre>{{names}}</code> 是节点名列表（每个后面带逗号，放在策略组固定成员前面），<code v-pre>{{names_list}}</code> 是不带尾逗号的节点名列表，<code v-pre>{{sub_url}}</code> 是这个订阅的地址，<code v-pre>{{name}}</code> 是订阅名称；Clash 还可以用 <code v-pre>{{provider_url}}</code>、<code v-pre>{{provider_exclude}}</code>。</p></div></div>
+        <p>节点写在单独一行的 <code v-pre>{{proxies}}</code> 处；<code v-pre>{{names}}</code> 是节点名列表（每个后面带逗号，放在策略组固定成员前面），<code v-pre>{{names_list}}</code> 是不带尾逗号的节点名列表，<code v-pre>{{sub_url}}</code> 是这个订阅的地址，<code v-pre>{{name}}</code> 是订阅名称。Clash 还可以用 <code v-pre>{{provider_url}}</code> 让客户端自己从订阅拉取节点——内置的 Clash 模板就是这样，不写 <code v-pre>{{proxies}}</code>；两者都用时，可以用 <code v-pre>{{provider_exclude}}</code> 排掉已内联的节点以免重复。</p></div></div>
       <div class="dialog-body">
         <ul v-if="editor.error" class="errors" data-test="tpl-errors"><li>{{ editor.error }}</li></ul>
         <div class="row2">
