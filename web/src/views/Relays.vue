@@ -3,7 +3,7 @@
 // somewhere else. The landing side is either another server in the panel or an
 // address typed in, and the hop can be encrypted.
 import { onMounted, onUnmounted, ref } from 'vue'
-import { api, type Relay, type Server } from '../api'
+import { api, formatBytes, localTime, type Relay, type Server } from '../api'
 import RelayDialog from '../components/RelayDialog.vue'
 
 const relays = ref<Relay[]>([])
@@ -56,7 +56,7 @@ function openEdit(r: Relay) {
   <div class="card table-wrap">
     <table>
       <thead>
-        <tr><th>ID</th><th>状态</th><th>名称</th><th>入口服务器</th><th>监听端口</th><th>落地</th><th>协议</th><th>加密</th><th>操作</th></tr>
+        <tr><th>ID</th><th>状态</th><th>名称</th><th>入口服务器</th><th>监听端口</th><th>落地</th><th>协议</th><th>加密</th><th>延迟</th><th>抖动</th><th>丢包</th><th>流量</th><th>操作</th></tr>
       </thead>
       <tbody>
         <tr v-for="r in relays" :key="r.id" :data-test="`relay-${r.name}`" :data-status="r.status">
@@ -80,6 +80,15 @@ function openEdit(r: Relay) {
             </template>
             <template v-else>否</template>
           </td>
+          <td :title="r.last_sample_at ? `测于 ${localTime(r.last_sample_at)}` : '还没有测量数据'">
+            {{ r.last_rtt_ms === null ? '—' : `${r.last_rtt_ms.toFixed(1)} ms` }}
+          </td>
+          <td>{{ r.last_jitter_ms === null ? '—' : `${r.last_jitter_ms.toFixed(1)} ms` }}</td>
+          <td>
+            <span v-if="r.last_loss_pct === null">—</span>
+            <span v-else :class="{ 'badge warn': r.last_loss_pct > 0 }">{{ r.last_loss_pct }}%</span>
+          </td>
+          <td>{{ formatBytes(r.traffic_bytes) }}</td>
           <td>
             <button class="btn small ghost" :disabled="r.status === 'queued' || r.status === 'deleting'" :data-test="`edit-${r.name}`" @click="openEdit(r)">编辑</button>
             <button class="btn small ghost danger" :disabled="r.status === 'deleting'" @click="remove(r)">删除</button>

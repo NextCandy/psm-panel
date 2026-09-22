@@ -46,6 +46,14 @@ export type Relay = {
   id: number; server_id: number; name: string; listen_port: number; remote_host: string; remote_port: number
   remote_server_id: number | null; udp: boolean; tls: boolean; tls_sni: string; tls_insecure: boolean
   status: NodeStatus; last_error: string | null; created_at: string
+  /** the newest measurement of the hop; null until the first one arrives */
+  last_rtt_ms: number | null; last_jitter_ms: number | null; last_loss_pct: number | null
+  last_sample_at: string | null; traffic_bytes: number
+}
+
+/** One reading of a relay's hop; `bytes` is that interval's traffic. */
+export type RelaySample = {
+  at: string; rtt_ms: number | null; jitter_ms: number | null; loss_pct: number; bytes: number
 }
 
 export type Subscription = {

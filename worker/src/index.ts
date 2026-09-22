@@ -47,10 +47,14 @@ type RelayRow = {
   id: number; server_id: number; name: string; listen_port: number; remote_host: string; remote_port: number
   remote_server_id: number | null; udp: number; tls: number; tls_sni: string; tls_insecure: number
   status: string; last_error: string | null; created_at: string
+  meter_bytes: number; traffic_bytes: number
+  last_rtt_ms: number | null; last_jitter_ms: number | null; last_loss_pct: number | null; last_sample_at: string | null
 }
 type TaskRow = { id: number; server_id: number; node_id: number | null; relay_id: number | null; kind: string; payload_enc: string; status: string }
 type AgentResult = { task_id: number; ok: boolean; link?: string; outbound?: unknown; clash?: unknown; error?: string; output?: unknown }
 type TrafficEntry = { tag?: unknown; used_bytes?: unknown; paused?: unknown }
+/** One measurement of a relay's hop, as `psm relay probe --json` reports it. */
+type RelaySample = { tag?: unknown; rtt_ms?: unknown; jitter_ms?: unknown; loss_pct?: unknown; bytes?: unknown }
 type C = Context<{ Bindings: Env }>
 
 const app = new Hono<{ Bindings: Env }>()
@@ -557,6 +561,19 @@ app.get('/api/relays', async (c) => {
   return c.json(results.map(publicRelay))
 })
 
+// A relay's hop over time: round trip, jitter, loss and the traffic of each
+// interval, newest last. `hours` covers the seven days that are kept.
+app.get('/api/relays/:id/metrics', async (c) => {
+  const r = await getRelay(c.env, c.req.param('id'))
+  if (!r) return c.json(fail('not_found', 'no such relay'), 404)
+  const hours = Math.min(Math.max(Number(new URL(c.req.url).searchParams.get('hours')) || 6, 1), 24 * 7)
+  const { results } = await c.env.DB.prepare(
+    `SELECT at, rtt_ms, jitter_ms, loss_pct, bytes FROM relay_samples
+      WHERE relay_id = ? AND at >= datetime('now', ?) ORDER BY at`)
+    .bind(r.id, `-${hours} hours`).all()
+  return c.json({ hours, relay: publicRelay(r), samples: results })
+})
+
 // Create a relay on the entry server. A server that has joined gets it through
 // its agent (realm is installed there on first use); otherwise it waits.
 app.post('/api/relays', async (c) => {
@@ -1055,6 +1072,37 @@ async function applyTraffic(env: Env, server: ServerRow, entries: TrafficEntry[]
   if (stmts.length) await env.DB.batch(stmts)
 }
 
+/**
+ * The relay measurements a server sent. The byte counter on the server only
+ * grows (and starts again when the accounting rules are rebuilt), so what is
+ * stored per sample is the difference since the last reading; the newest
+ * reading is also kept on the relay itself, so the list needs no samples.
+ * Seven days of samples are kept — what the charts draw.
+ */
+async function applyRelaySamples(env: Env, server: ServerRow, entries: RelaySample[]) {
+  const { results } = await env.DB.prepare('SELECT * FROM relays WHERE server_id = ?').bind(server.id).all<RelayRow>()
+  const byName = new Map(results.map((r) => [r.name, r]))
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  const stmts: D1PreparedStatement[] = []
+  for (const e of entries.slice(0, 200)) {
+    const r = typeof e.tag === 'string' ? byName.get(e.tag) : undefined
+    if (!r) continue
+    const rtt = num(e.rtt_ms), jitter = num(e.jitter_ms), loss = num(e.loss_pct) ?? 0
+    const total = Math.max(0, Math.floor(num(e.bytes) ?? 0))
+    const delta = total >= r.meter_bytes ? total - r.meter_bytes : total
+    stmts.push(env.DB.prepare(
+      'INSERT INTO relay_samples (relay_id, rtt_ms, jitter_ms, loss_pct, bytes) VALUES (?, ?, ?, ?, ?)')
+      .bind(r.id, rtt, jitter, loss, delta))
+    stmts.push(env.DB.prepare(
+      `UPDATE relays SET meter_bytes = ?, traffic_bytes = traffic_bytes + ?, last_rtt_ms = ?, last_jitter_ms = ?,
+              last_loss_pct = ?, last_sample_at = datetime('now') WHERE id = ?`)
+      .bind(total, delta, rtt, jitter, loss, r.id))
+  }
+  if (!stmts.length) return
+  stmts.push(env.DB.prepare(`DELETE FROM relay_samples WHERE at < datetime('now', '-7 days')`))
+  await env.DB.batch(stmts)
+}
+
 // Sync: the agent reports the results of its tasks (and its traffic
 // counters) and takes new ones.
 app.post('/api/agent/sync', async (c) => {
@@ -1063,7 +1111,7 @@ app.post('/api/agent/sync', async (c) => {
     ? await c.env.DB.prepare('SELECT * FROM servers WHERE agent_token_hash = ?').bind(await sha256Hex(token)).first<ServerRow>()
     : null
   if (!server) return c.json(fail('unauthorized', 'unknown agent token'), 401)
-  type SyncBody = { hostname?: string; agent_version?: string; psm_version?: string; results?: AgentResult[]; traffic?: TrafficEntry[] }
+  type SyncBody = { hostname?: string; agent_version?: string; psm_version?: string; results?: AgentResult[]; traffic?: TrafficEntry[]; relays?: { items?: RelaySample[] } | RelaySample[] }
   const body = await c.req.json<SyncBody>().catch((): SyncBody => ({}))
   await c.env.DB.prepare(`UPDATE servers SET last_seen = datetime('now'), hostname = COALESCE(?, hostname),
       agent_version = COALESCE(?, agent_version), psm_version = COALESCE(?, psm_version) WHERE id = ?`)
@@ -1085,6 +1133,9 @@ app.post('/api/agent/sync', async (c) => {
     await applyResult(c.env, server, t, r)
   }
   if (Array.isArray(body.traffic)) await applyTraffic(c.env, server, body.traffic)
+  // `psm relay probe --json` wraps its rows in {api_version, count, items}
+  const samples = Array.isArray(body.relays) ? body.relays : body.relays?.items
+  if (Array.isArray(samples)) await applyRelaySamples(c.env, server, samples)
 
   const { results: due } = await c.env.DB.prepare(
     `SELECT * FROM tasks WHERE server_id = ? AND (status = 'queued' OR (status = 'running' AND claimed_at < datetime('now', '-${TASK_RETRY_MINUTES} minutes')))
