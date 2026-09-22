@@ -7,7 +7,7 @@
 // protocol, how it runs, the server and the name; a stored password shows as
 // •••••• and stays unless replaced.
 import { computed, reactive, ref, watch } from 'vue'
-import { PROTOCOLS, ENGINE_LABELS, activeFields, validateNode, type Engine } from '@shared/protocols'
+import { PROTOCOLS, ENGINE_LABELS, activeFields, canMount443, validateNode, type Engine } from '@shared/protocols'
 import { api, ApiError, type PanelNode, type Server } from '../api'
 import InstallCommand from './InstallCommand.vue'
 
@@ -39,6 +39,12 @@ const result = ref<null | { status: string; joined: boolean; install_command?: s
 const protocol = computed(() => PROTOCOLS.find((p) => p.id === protocolId.value))
 const variant = computed(() => protocol.value?.variants.find((v) => v.id === variantId.value))
 const fields = computed(() => (variant.value ? activeFields(variant.value, engine.value, params) : []))
+
+// Sharing the public 443: only protocols Nginx can tell apart by the name in
+// the TLS handshake, and only when the node is made — PSM refuses to move a
+// node onto or off the shared 443 as an update, so this is fixed afterwards.
+const mount443 = ref(props.node?.mount_443 ?? false)
+const canMount = computed(() => !!variant.value && canMount443(engine.value, variant.value.psm))
 
 function pickProtocol(id: string) {
   protocolId.value = id
@@ -100,11 +106,14 @@ async function submit() {
   errors.value = []
   if (!variant.value) return (errors.value = ['请选择协议类型'])
   const port = num(form.port)
+  const shared443 = canMount.value && mount443.value
   const input = {
     protocol: protocolId.value, variant: variantId.value, engine: engine.value,
     name: form.name.trim(), address: form.address.trim(),
-    port: port as number, public_port: num(form.publicPort) ?? port,
+    // on the shared 443 the node listens on 127.0.0.1 and clients reach 443
+    port: port as number, public_port: shared443 ? 443 : num(form.publicPort) ?? port,
     traffic_limit_gb: num(form.traffic) ?? 0, labels: form.labels, params: { ...params },
+    mount_443: shared443,
   }
   const v = validateNode(input)
   if (!v.ok) return (errors.value = v.errors)
@@ -237,10 +246,21 @@ async function submit() {
           <input v-model="form.address" class="input" placeholder="请输入节点域名或者 IP" data-test="address">
         </div>
 
+        <div v-if="canMount" class="field">
+          <label class="check">
+            <input v-model="mount443" type="checkbox" :disabled="editing" data-test="mount-443"> 挂到 443 端口复用
+          </label>
+          <div class="help">
+            节点监听本机回环地址，Nginx 按 TLS 握手里的域名把公网 443 转给它，可以和其他节点、伪装网站共用一个 443。
+            服务器上没有 Nginx 会自动装上。<b>建好之后不能再改</b>：改用直连端口要删掉重建。
+          </div>
+        </div>
+
         <div class="ports field">
           <div>
             <span class="field-label" title="客户端连接的端口">连接端口 ⓘ</span>
-            <input v-model="form.publicPort" class="input" type="number" min="1" max="65535" placeholder="用户连接端口" data-test="public-port">
+            <input v-if="!(canMount && mount443)" v-model="form.publicPort" class="input" type="number" min="1" max="65535" placeholder="用户连接端口" data-test="public-port">
+            <input v-else class="input" value="443" disabled data-test="public-port-443">
           </div>
           <span class="arrow">⇄</span>
           <div>

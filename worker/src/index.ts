@@ -6,7 +6,8 @@ import { Hono, type Context } from 'hono'
 import { decrypt, encrypt } from './crypto'
 import { ensureSchema, storedTokenKey } from './schema'
 import {
-  adminConfigured, clearFailures, clearedCookie, passwordMatches, recordFailure, sessionCookie, tooManyFailures, validSession,
+  adminConfigured, clearFailures, clearedCookie, passwordMatches, recordFailure, sessionCookie, syncAdminPassword,
+  tooManyFailures, validSession,
 } from './auth'
 import { buildSubscription, pickFormat, type SubNode } from './subscription'
 import { BUILTIN_TEMPLATES, FORMAT_LABELS, TEMPLATE_FORMATS, type TemplateFormat } from './templates'
@@ -42,6 +43,7 @@ type NodeRow = {
   labels: string; params_enc: string; link_enc: string | null; outbound_enc: string | null; clash_enc: string | null
   status: string; last_error: string | null; created_at: string
   traffic_used: number; traffic_paused: number; traffic_at: string | null; reset_day: number
+  mount_443: number
 }
 type RelayRow = {
   id: number; server_id: number; name: string; listen_port: number; remote_host: string; remote_port: number
@@ -162,7 +164,8 @@ async function queueApply(env: Env, n: NodeRow, data: Record<string, unknown>, k
   } else if (kind === 'update') {
     await enqueue(env, n.server_id, n.id, { kind: 'node.update', core: n.engine, tag: n.name, data, ...common })
   } else {
-    await enqueue(env, n.server_id, n.id, { kind: 'node.add', core: n.engine, data, ...common })
+    // mount443 is not a node setting but how PSM must create it (--mount-443)
+    await enqueue(env, n.server_id, n.id, { kind: 'node.add', core: n.engine, data, mount443: !!n.mount_443, ...common })
   }
   await enqueue(env, n.server_id, n.id, trafficTask(n))
 }
@@ -189,7 +192,8 @@ async function publicNode(env: Env, n: NodeRow) {
   const secret = new Set((v?.fields ?? []).filter((f) => f.type === 'password').map((f) => f.key))
   for (const k of Object.keys(params)) if (secret.has(k) && params[k]) params[k] = MASK
   const { params_enc: _p, link_enc: _l, outbound_enc: _o, clash_enc: _c, ...rest } = n
-  return { ...rest, traffic_paused: !!n.traffic_paused, labels: JSON.parse(n.labels), params, has_link: !!n.link_enc }
+  return { ...rest, traffic_paused: !!n.traffic_paused, mount_443: !!n.mount_443,
+    labels: JSON.parse(n.labels), params, has_link: !!n.link_enc }
 }
 
 function cleanLabels(raw: unknown): string[] {
@@ -211,6 +215,8 @@ function keptParams(variantFields: { key: string }[], incoming: Record<string, u
 app.use('*', async (c, next) => {
   await ensureSchema(c.env.DB)
   if (!c.env.TOKEN_KEY) c.env.TOKEN_KEY = await storedTokenKey(c.env.DB)
+  // after TOKEN_KEY: the session signature is derived from it
+  await syncAdminPassword(c.env)
   await next()
 })
 
@@ -373,15 +379,17 @@ app.post('/api/nodes', async (c) => {
   const params = keptParams(activeFields(variant, v.engine, body.params ?? {}), body.params ?? {})
   const joined = !!server.agent_token_hash
   const status = joined ? 'queued' : 'waiting'
+  const mount443 = !!body.mount_443
 
   let id: number
   try {
     const r = await c.env.DB.prepare(
-      `INSERT INTO nodes (server_id, protocol, variant, engine, psm_protocol, name, address, port, public_port, traffic_limit_gb, reset_day, labels, params_enc, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      `INSERT INTO nodes (server_id, protocol, variant, engine, psm_protocol, name, address, port, public_port, traffic_limit_gb, reset_day, labels, params_enc, status, mount_443)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(server.id, body.protocol, body.variant, v.engine, v.psmProtocol, body.name, body.address, body.port,
-        body.public_port ?? null, body.traffic_limit_gb ?? 0, resetDay, JSON.stringify(cleanLabels(body.labels)),
-        await encrypt(c.env.TOKEN_KEY, JSON.stringify(params)), status)
+        // on the shared 443 the node listens on 127.0.0.1 and clients reach 443
+        mount443 ? 443 : body.public_port ?? null, body.traffic_limit_gb ?? 0, resetDay, JSON.stringify(cleanLabels(body.labels)),
+        await encrypt(c.env.TOKEN_KEY, JSON.stringify(params)), status, mount443 ? 1 : 0)
       .run()
     id = Number(r.meta.last_row_id)
   } catch (e) {
@@ -405,6 +413,12 @@ app.patch('/api/nodes/:id', async (c) => {
   if (n.status === 'queued' || n.status === 'deleting') return c.json(fail('busy', '节点正在下发或删除，稍后再改'), 409)
   const body = await c.req.json<Partial<NodeInput> & { reset_day?: number }>().catch(() => null)
   if (!body) return c.json(fail('bad_body', 'the body must be a JSON object'), 400)
+  // PSM refuses to move a node onto or off the shared 443 as an update: the
+  // node's public address changes, so that is a delete and an add.
+  if (body.mount_443 !== undefined && !!body.mount_443 !== !!n.mount_443) {
+    const msg = '443 端口复用不能改：请删除这个节点后按新的方式重建'
+    return c.json(fail('invalid', msg, { errors: [msg] }), 400)
+  }
   const stored = JSON.parse(await decrypt(c.env.TOKEN_KEY, n.params_enc)) as Record<string, unknown>
   const input: NodeInput = {
     protocol: n.protocol, variant: n.variant, engine: n.engine as NodeInput['engine'], name: n.name,

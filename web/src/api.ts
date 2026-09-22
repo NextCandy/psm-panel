@@ -33,6 +33,8 @@ export type PanelNode = {
   name: string; address: string; port: number; public_port: number | null; traffic_limit_gb: number
   labels: string[]; params: Record<string, unknown>; status: NodeStatus
   last_error: string | null; created_at: string; has_link: boolean
+  /** shares the public 443 by SNI; fixed when the node is created */
+  mount_443: boolean
   traffic_used: number; traffic_paused: boolean; traffic_at: string | null; reset_day: number
 }
 

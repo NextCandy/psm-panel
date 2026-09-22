@@ -78,7 +78,7 @@ async function save() {
       <dt>面板版本</dt><dd data-test="panel-version">{{ settings.version }}</dd>
       <dt>服务器同步间隔</dt><dd>空闲时 {{ settings.sync_interval }} 秒，有任务时 3 秒（Worker 变量 SYNC_INTERVAL）</dd>
       <dt>数据加密密钥</dt><dd>{{ settings.token_key === 'secret' ? 'Worker 机密 TOKEN_KEY' : '面板自动生成（存于 D1）' }}</dd>
-      <dt>管理员密码</dt><dd>在 Cloudflare 控制台打开这个 Worker 的“设置 → 变量和机密”，修改机密 ADMIN_PASSWORD；改后所有已登录的会话失效。</dd>
+      <dt>管理员密码</dt><dd>在 Cloudflare 控制台打开这个 Worker 的“设置 → 变量和机密”，修改<strong>机密</strong> ADMIN_PASSWORD；改后所有已登录的会话失效。面板第一次读到这个机密时会把它的加盐哈希记在 D1 里，所以之后重新部署即使机密丢了也仍能登录（机密还在时以机密为准）。注意别用“变量”：明文变量会在每次部署时被清掉。</dd>
     </dl>
   </div>
   <div v-if="settings" class="card" style="padding: 18px; margin-bottom: 16px">

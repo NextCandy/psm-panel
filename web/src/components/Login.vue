@@ -38,8 +38,11 @@ async function submit() {
         <button class="btn primary login-btn" type="submit" :disabled="busy || !password" data-test="login">登录</button>
       </template>
       <p v-else class="login-help" data-test="not-configured">
-        还没有设置管理员密码。在 Cloudflare 控制台打开这个 Worker 的“设置 → 变量和机密”，添加机密
-        <code>ADMIN_PASSWORD</code>（至少 8 位），然后刷新此页。
+        还没有设置管理员密码。在 Cloudflare 控制台打开这个 Worker 的“设置 → 变量和机密”，添加
+        <strong>机密（Secret）</strong> <code>ADMIN_PASSWORD</code>（至少 8 位），然后刷新此页。
+        <br>
+        注意要选“机密”，不要选“变量”：部署配置里没有声明任何变量，明文变量会在每次重新部署时被清掉。
+        只需设置这一次，面板会把它记在自己的数据库里，之后重新部署不会再丢。
       </p>
     </form>
   </div>

@@ -265,6 +265,27 @@ export interface NodeInput {
   traffic_limit_gb?: number
   labels?: string[]
   params?: Record<string, unknown>
+  /**
+   * Share the public 443: the node listens on 127.0.0.1 and Nginx routes the
+   * connection to it by the name in the TLS handshake. This is not a node
+   * setting — it is how the node is created (`psm node add … --mount-443`),
+   * and PSM refuses to move a node onto or off the shared 443 as an update.
+   */
+  mount_443?: boolean
+}
+
+/**
+ * Which nodes can share the public 443. Nginx routes by the name in the TLS
+ * handshake, so only a protocol that starts with a TLS ClientHello can be told
+ * apart there — the same list PSM checks (_node_cli_fronted_pair).
+ */
+const FRONTED: Partial<Record<Engine, string[]>> = {
+  xray: ['reality', 'vision', 'xhttp', 'trojan', 'vmess'],
+  'sing-box': ['reality', 'anytls', 'trojan', 'vmess', 'vless'],
+  mihomo: ['reality', 'anytls', 'trojan', 'vmess', 'vless'],
+}
+export function canMount443(engine: Engine, psmProtocol: string): boolean {
+  return (FRONTED[engine] ?? []).includes(psmProtocol)
 }
 
 // never starting with "-": on the server the name is an argument to psm, and
@@ -291,6 +312,8 @@ export function validateNode(n: NodeInput):
   if (n.public_port !== undefined && !portOk(n.public_port)) errors.push('连接端口：1-65535')
   if (n.traffic_limit_gb !== undefined && !(Number.isFinite(n.traffic_limit_gb) && n.traffic_limit_gb >= 0))
     errors.push('流量限制：不小于 0 的数字')
+  if (n.mount_443 && !canMount443(n.engine, v.psm))
+    errors.push(`${v.label} 用 ${ENGINE_LABELS[n.engine] ?? n.engine} 运行时不能挂到 443 复用`)
 
   const params = n.params ?? {}
   const data: Record<string, unknown> = { tag: n.name, port: n.port }
