@@ -37,9 +37,15 @@ async function showLink(n: PanelNode) {
   }
 }
 async function remove(n: PanelNode) {
-  if (!confirm(`删除节点 ${n.name}？服务器上的节点也会一起删除。`)) return
+  // A node whose server never answers again stays in 删除中 for ever, so that
+  // state must still offer a way out: forget it here, as a server can be.
+  const stuck = n.status === 'deleting'
+  const msg = stuck
+    ? `${n.name} 一直停在删除中，服务器没有回应。只从面板移除吗？\n\n服务器上的节点不会被删掉；那台机器如果还在，请在它上面执行 psm node delete 清理。`
+    : `删除节点 ${n.name}？服务器上的节点也会一起删除。`
+  if (!confirm(msg)) return
   try {
-    await api(`/api/nodes/${n.id}`, { method: 'DELETE' })
+    await api(`/api/nodes/${n.id}${stuck ? '?force=1' : ''}`, { method: 'DELETE' })
     await load()
   } catch (e) {
     message.value = (e as Error).message
@@ -88,7 +94,7 @@ function openEdit(n: PanelNode) {
           <td>
             <button class="btn small ghost" :disabled="!n.has_link" @click="showLink(n)">链接</button>
             <button class="btn small ghost" :disabled="n.status === 'queued' || n.status === 'deleting'" :data-test="`edit-${n.name}`" @click="openEdit(n)">编辑</button>
-            <button class="btn small ghost danger" :disabled="n.status === 'deleting'" @click="remove(n)">删除</button>
+            <button class="btn small ghost danger" @click="remove(n)">{{ n.status === 'deleting' ? '强制移除' : '删除' }}</button>
           </td>
         </tr>
       </tbody>

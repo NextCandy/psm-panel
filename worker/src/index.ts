@@ -309,16 +309,22 @@ app.delete('/api/servers/:id', async (c) => {
   }
   if (s.leaving) return c.json({ status: 'leaving' }, 202)
   const { results } = await c.env.DB.prepare(`SELECT * FROM nodes WHERE server_id = ? AND status != 'waiting'`).bind(s.id).all<NodeRow>()
+  // The relay rows go with the server (they are ON DELETE CASCADE), but the
+  // realm rules and their accounting rules would be left behind on the machine
+  // unless the agent is told to remove them as well.
+  const { results: rels } = await c.env.DB.prepare(
+    `SELECT name FROM relays WHERE server_id = ? AND status != 'waiting'`).bind(s.id).all<{ name: string }>()
   const plan = {
     nodes: results.filter((n) => n.engine !== 'standalone').map((n) => ({ core: n.engine, protocol: n.psm_protocol, tag: n.name })),
     standalone: [...new Set(results.filter((n) => n.engine === 'standalone').map((n) => n.psm_protocol))],
+    relays: rels.map((r) => r.name),
   }
   await c.env.DB.batch([
     c.env.DB.prepare(`DELETE FROM tasks WHERE server_id = ? AND status = 'queued'`).bind(s.id),
     c.env.DB.prepare(`UPDATE servers SET leaving = 1, leave_error = NULL WHERE id = ?`).bind(s.id),
   ])
   await enqueue(c.env, s.id, null, { kind: 'agent.leave', data: plan })
-  await audit(c.env, 'server.leave', s.name, `${plan.nodes.length} 个节点，${plan.standalone.length} 个独立安装`)
+  await audit(c.env, 'server.leave', s.name, `${plan.nodes.length} 个节点，${plan.standalone.length} 个独立安装，${plan.relays.length} 条中转`)
   return c.json({ status: 'leaving' }, 202)
 })
 
@@ -456,7 +462,11 @@ app.delete('/api/nodes/:id', async (c) => {
   const n = await getNode(c.env, c.req.param('id'))
   if (!n) return c.json(fail('not_found', 'no such node'), 404)
   const server = await getServer(c.env, n.server_id)
-  if (n.status === 'applied' || n.status === 'deleting') {
+  // ?force=1 forgets it without waiting for the server, as for a relay or a
+  // server itself: a node on a machine that never answers again would sit in
+  // "deleting" for ever, and nothing could remove it.
+  const force = new URL(c.req.url).searchParams.get('force') === '1'
+  if (!force && (n.status === 'applied' || n.status === 'deleting')) {
     if (n.status === 'applied') {
       await enqueue(c.env, n.server_id, n.id, n.engine === 'standalone'
         ? { kind: 'standalone.remove', protocol: n.psm_protocol }
@@ -690,7 +700,11 @@ app.delete('/api/relays/:id', async (c) => {
   const r = await getRelay(c.env, c.req.param('id'))
   if (!r) return c.json(fail('not_found', 'no such relay'), 404)
   const server = await getServer(c.env, r.server_id)
-  if (r.status === 'applied' || r.status === 'deleting') {
+  // ?force=1 drops it from the panel without waiting for the server, the way a
+  // server itself can be forgotten: a relay on a machine that never comes back
+  // would otherwise sit in "deleting" for ever, with no way out.
+  const force = new URL(c.req.url).searchParams.get('force') === '1'
+  if (!force && (r.status === 'applied' || r.status === 'deleting')) {
     if (r.status === 'applied') {
       await enqueue(c.env, r.server_id, null, { kind: 'relay.delete', tag: r.name }, r.id)
       await c.env.DB.prepare(`UPDATE relays SET status = 'deleting' WHERE id = ?`).bind(r.id).run()
@@ -986,6 +1000,16 @@ app.post('/api/agent/join', async (c) => {
   for (const n of waiting) {
     await queueApply(c.env, n, await nodeData(c.env, n))
     await c.env.DB.prepare(`UPDATE nodes SET status = 'queued', last_error = NULL WHERE id = ?`).bind(n.id).run()
+  }
+  // Relays wait for their server in the same way a node does — a relay can be
+  // created before the server has joined, and the panel hands out the install
+  // command for it — so they are sent now too. Without this they stayed
+  // "waiting" for ever, since nothing else ever queues them.
+  const { results: pending } = await c.env.DB.prepare(
+    `SELECT * FROM relays WHERE server_id = ? AND status IN ('waiting', 'failed')`).bind(server.id).all<RelayRow>()
+  for (const r of pending) {
+    await queueRelay(c.env, r, 'add')
+    await c.env.DB.prepare(`UPDATE relays SET status = 'queued', last_error = NULL WHERE id = ?`).bind(r.id).run()
   }
   await enqueue(c.env, server.id, null, { kind: 'status' })
   await audit(c.env, 'server.join', server.name, body?.hostname ?? '', 'agent')

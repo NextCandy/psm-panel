@@ -114,9 +114,15 @@ const totalBytes = (rows: RelaySample[]) => rows.reduce((a, s) => a + (s.bytes |
 const worstLoss = (rows: RelaySample[]) => (rows.length ? Math.max(...rows.map((s) => s.loss_pct || 0)) : 0)
 
 async function remove(r: Relay) {
-  if (!confirm(`删除中转 ${r.name}？服务器上的转发规则也会一起删除。`)) return
+  // Same as on the nodes page: a relay whose server never answers again would
+  // stay in 删除中 for ever, so that state has to offer a way out.
+  const stuck = r.status === 'deleting'
+  const msg = stuck
+    ? `${r.name} 一直停在删除中，服务器没有回应。只从面板移除吗？\n\n服务器上的转发规则不会被删掉；那台机器如果还在，请在它上面执行 psm relay delete 清理。`
+    : `删除中转 ${r.name}？服务器上的转发规则也会一起删除。`
+  if (!confirm(msg)) return
   try {
-    await api(`/api/relays/${r.id}`, { method: 'DELETE' })
+    await api(`/api/relays/${r.id}${stuck ? '?force=1' : ''}`, { method: 'DELETE' })
     await load()
   } catch (e) {
     message.value = (e as Error).message
@@ -177,7 +183,7 @@ function openEdit(r: Relay) {
           <td>{{ formatBytes(r.traffic_bytes) }}</td>
           <td>
             <button class="btn small ghost" :disabled="r.status === 'queued' || r.status === 'deleting'" :data-test="`edit-${r.name}`" @click.stop="openEdit(r)">编辑</button>
-            <button class="btn small ghost danger" :disabled="r.status === 'deleting'" @click.stop="remove(r)">删除</button>
+            <button class="btn small ghost danger" @click.stop="remove(r)">{{ r.status === 'deleting' ? '强制移除' : '删除' }}</button>
           </td>
         </tr>
         <tr v-if="expanded === r.id" class="relay-detail" :data-test="`detail-${r.name}`">
