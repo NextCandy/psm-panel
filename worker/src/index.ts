@@ -16,7 +16,7 @@ import { activeFields, findVariant, trafficTag, validateNode, type NodeInput } f
 // not exported: every export of a Worker's main module is taken for an entrypoint
 // Shown in 系统设置 as 面板版本; bump it whenever the panel gains something, so
 // that it answers "did my deploy take effect?" — the only marker a user has.
-const PANEL_VERSION = '0.5.0'
+const PANEL_VERSION = '0.6.0'
 
 // The psm-agent release this panel expects its servers to run: the 服务器 page
 // offers an upgrade to every joined server reporting anything else. Bump it
