@@ -21,7 +21,7 @@ const PANEL_VERSION = '0.5.0'
 // The psm-agent release this panel expects its servers to run: the 服务器 page
 // offers an upgrade to every joined server reporting anything else. Bump it
 // together with the agent-v… release the panel's install command installs.
-const AGENT_VERSION = '0.10.0'
+const AGENT_VERSION = '0.10.1'
 
 export type Env = {
   DB: D1Database
