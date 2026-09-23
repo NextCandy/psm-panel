@@ -18,6 +18,11 @@ import { activeFields, findVariant, trafficTag, validateNode, type NodeInput } f
 // that it answers "did my deploy take effect?" — the only marker a user has.
 const PANEL_VERSION = '0.5.0'
 
+// The psm-agent release this panel expects its servers to run: the 服务器 page
+// offers an upgrade to every joined server reporting anything else. Bump it
+// together with the agent-v… release the panel's install command installs.
+const AGENT_VERSION = '0.10.0'
+
 export type Env = {
   DB: D1Database
   ASSETS: Fetcher
@@ -267,7 +272,9 @@ app.get('/api/servers', async (c) => {
             (SELECT COUNT(*) FROM nodes n WHERE n.server_id = s.id) AS node_count,
             (SELECT COALESCE(SUM(n.traffic_used), 0) FROM nodes n WHERE n.server_id = s.id) AS traffic_used
        FROM servers s ORDER BY s.id`).all()
-  return c.json(results)
+  // agent_latest rides along so the page can mark an outdated agent without a
+  // second request
+  return c.json(results.map((r) => ({ ...r, agent_latest: AGENT_VERSION })))
 })
 
 // Add a server; it waits for its install command.
@@ -291,6 +298,20 @@ app.post('/api/servers/:id/install-command', async (c) => {
   const s = await getServer(c.env, c.req.param('id'))
   if (!s) return c.json(fail('not_found', 'no such server'), 404)
   return c.json({ install_command: await installCommand(c, await newJoinToken(c.env, s.id)) })
+})
+
+// Upgrade psm-agent on a server, so that it does not need the install command
+// run by hand over SSH. The agent reports this task before doing any of it: the
+// upgrade updates PSM first (the psm-agent version to install is named in PSM's
+// own lib/agent.sh), then replaces the binary and restarts the service, which
+// stops the process that would otherwise report the result.
+app.post('/api/servers/:id/upgrade-agent', async (c) => {
+  const s = await getServer(c.env, c.req.param('id'))
+  if (!s) return c.json(fail('not_found', 'no such server'), 404)
+  if (!s.agent_token_hash) return c.json(fail('not_joined', 'the server has not joined yet'), 409)
+  await enqueue(c.env, s.id, null, { kind: 'agent.update' })
+  await audit(c.env, 'server.upgrade-agent', s.name, `${s.agent_version ?? '未知'} → ${AGENT_VERSION}`)
+  return c.json({ status: 'queued' }, 202)
 })
 
 // Remove a server. One that has joined is asked to clean up first: its agent

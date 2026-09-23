@@ -22,6 +22,8 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
 export type Server = {
   id: number; name: string; status: 'pending' | 'online' | 'offline' | 'leaving'
   hostname: string | null; agent_version: string | null; psm_version: string | null; leave_error: string | null
+  /** the psm-agent release the panel expects; a server reporting another can be upgraded */
+  agent_latest?: string
   note: string; last_seen: string | null; created_at: string; status_at: string | null
   node_count: number; traffic_used: number
 }

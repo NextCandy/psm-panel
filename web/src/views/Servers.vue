@@ -63,6 +63,20 @@ async function remove(s: Server) {
   }
   await load()
 }
+// An agent older than the one the panel expects can be upgraded from here: the
+// server updates PSM, installs the psm-agent it names and restarts it. Only for
+// a server that is online — an offline one would only queue the task.
+const outdated = (s: Server) => s.status === 'online' && !!s.agent_version && !!s.agent_latest && s.agent_version !== s.agent_latest
+async function upgradeAgent(s: Server) {
+  if (!confirm(`把 ${s.name} 上的 psm-agent 从 ${s.agent_version} 升级到 ${s.agent_latest}？\n\n服务器上会先更新 PSM，再替换 psm-agent 并重启它。节点和中转不受影响。`)) return
+  error.value = ''
+  try {
+    await api(`/api/servers/${s.id}/upgrade-agent`, { method: 'POST' })
+    notice.value = `已通知 ${s.name} 升级 psm-agent，完成后 Agent 列会变成 ${s.agent_latest}。`
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  }
+}
 // while a server is leaving, look again every few seconds
 let leavingPoll: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
@@ -119,13 +133,14 @@ const statusText = { online: '在线', pending: '待接入', offline: '离线', 
           </td>
           <td>{{ s.hostname ?? '—' }}</td>
           <td>{{ s.psm_version ?? '—' }}</td>
-          <td>{{ s.agent_version ?? '—' }}</td>
+          <td>{{ s.agent_version ?? '—' }}<span v-if="outdated(s)" class="badge" :title="`可升级到 ${s.agent_latest}`">可升级</span></td>
           <td>{{ formatBytes(s.traffic_used) }}</td>
           <td>{{ localTime(s.last_seen) }}</td>
           <td>{{ s.node_count }}</td>
           <td>
             <button class="btn small ghost" :disabled="s.status === 'pending'" :data-test="`diagnose-${s.name}`" @click="diagnose(s)">诊断</button>
             <button class="btn small ghost" @click="newCommand(s)">安装命令</button>
+            <button v-if="outdated(s)" class="btn small ghost" :data-test="`upgrade-agent-${s.name}`" @click="upgradeAgent(s)">升级 agent</button>
             <button class="btn small ghost danger" :data-test="`remove-${s.name}`" @click="remove(s)">{{ s.status === 'leaving' ? '只从面板移除' : '移除' }}</button>
           </td>
         </tr>
