@@ -15,7 +15,7 @@ ALTER TABLE servers ADD COLUMN status_enc TEXT;
 ALTER TABLE servers ADD COLUMN status_at TEXT;
 
 -- Bytes counted per node and day (UTC).
-CREATE TABLE traffic_daily (
+CREATE TABLE IF NOT EXISTS traffic_daily (
     node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     day     TEXT NOT NULL,
     bytes   INTEGER NOT NULL DEFAULT 0,
@@ -25,7 +25,7 @@ CREATE TABLE traffic_daily (
 -- Subscriptions: one URL over every running node, or those with given labels.
 -- The token is kept encrypted (the panel shows the URL again) and as a hash
 -- (to look it up).
-CREATE TABLE subscriptions (
+CREATE TABLE IF NOT EXISTS subscriptions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
     labels     TEXT NOT NULL DEFAULT '[]',
@@ -36,7 +36,7 @@ CREATE TABLE subscriptions (
 );
 
 -- What was done in the panel.
-CREATE TABLE audit (
+CREATE TABLE IF NOT EXISTS audit (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     at     TEXT NOT NULL DEFAULT (datetime('now')),
     actor  TEXT NOT NULL,
@@ -44,4 +44,4 @@ CREATE TABLE audit (
     target TEXT NOT NULL DEFAULT '',
     detail TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX audit_by_time ON audit (at);
+CREATE INDEX IF NOT EXISTS audit_by_time ON audit (at);

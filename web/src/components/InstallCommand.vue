@@ -1,18 +1,13 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+// The one-click install command. Its join token lets a machine join as this
+// server, so the token is masked until asked for; copying needs no showing.
+import { computed } from 'vue'
+import SecretText from './SecretText.vue'
 
 const props = defineProps<{ command: string }>()
-const copied = ref(false)
-async function copy() {
-  await navigator.clipboard.writeText(props.command)
-  copied.value = true
-  setTimeout(() => (copied.value = false), 1500)
-}
+const token = computed(() => /--join (\S+)/.exec(props.command)?.[1] ?? '')
 </script>
 
 <template>
-  <div class="cmd">
-    <code data-test="install-command">{{ command }}</code>
-    <button class="btn" type="button" @click="copy">{{ copied ? '已复制' : '复制' }}</button>
-  </div>
+  <SecretText :value="command" :secret="token" dark copied="已复制安装命令" test="install-command" />
 </template>

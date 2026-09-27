@@ -6,7 +6,7 @@
 -- running total: the counter on the server only ever grows (and resets when
 -- the rules are rebuilt), so the panel stores the difference and keeps the
 -- last counter it saw on the relay itself.
-CREATE TABLE relay_samples (
+CREATE TABLE IF NOT EXISTS relay_samples (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     relay_id  INTEGER NOT NULL REFERENCES relays(id) ON DELETE CASCADE,
     at        TEXT NOT NULL DEFAULT (datetime('now')),
@@ -17,7 +17,7 @@ CREATE TABLE relay_samples (
 );
 
 -- the charts read one relay over a window, newest last
-CREATE INDEX relay_samples_by_relay ON relay_samples (relay_id, at);
+CREATE INDEX IF NOT EXISTS relay_samples_by_relay ON relay_samples (relay_id, at);
 
 -- The last counter seen (to turn a growing total into an interval), and the
 -- newest reading, so the list can show a relay's state without reading the

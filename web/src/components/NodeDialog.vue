@@ -6,10 +6,12 @@
 // that runs it (the server installs a missing core itself). Editing keeps the
 // protocol, how it runs, the server and the name; a stored password shows as
 // •••••• and stays unless replaced.
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { PROTOCOLS, ENGINE_LABELS, activeFields, canMount443, validateNode, type Engine } from '@shared/protocols'
-import { api, ApiError, type PanelNode, type Server } from '../api'
+import { api, ApiError, errorText, type PanelNode, type Server } from '../api'
+import { toast } from '../ui'
 import InstallCommand from './InstallCommand.vue'
+import Modal from './Modal.vue'
 
 const props = defineProps<{ servers: Server[]; node?: PanelNode | null }>()
 const emit = defineEmits<{ close: []; created: [] }>()
@@ -34,6 +36,24 @@ const form = reactive({
 const params = reactive<Record<string, unknown>>({ ...(props.node?.params ?? {}) })
 const errors = ref<string[]>([])
 const busy = ref(false)
+// the list has no settings: an edit reads them first (passwords come masked)
+const loading = ref(editing.value && !props.node?.params)
+onMounted(async () => {
+  if (!loading.value) return
+  try {
+    const full = await api<PanelNode>(`/api/nodes/${props.node!.id}`)
+    Object.assign(params, full.params ?? {})
+    // a setting left at its default is not stored: show the default the
+    // server runs with (validateNode applies the same), not an empty field
+    for (const f of variant.value?.fields ?? []) {
+      if (params[f.key] === undefined && f.default !== undefined) params[f.key] = f.default
+    }
+  } catch (e) {
+    errors.value = [errorText(e)]
+  } finally {
+    loading.value = false
+  }
+})
 const result = ref<null | { status: string; joined: boolean; install_command?: string; serverName: string; standalone: boolean }>(null)
 
 const protocol = computed(() => PROTOCOLS.find((p) => p.id === protocolId.value))
@@ -71,30 +91,32 @@ const num = (v: string | number) => (v === '' ? undefined : Number(v))
 // server (psm sni find, with the mapping engine from 系统设置) and filled in
 // with one click.
 type SniCandidate = { sni: string; dest: string; rtt_ms: number; warn: string }
-const sni = reactive({ busy: false, error: '', where: '', candidates: [] as SniCandidate[] })
+const sni = reactive({ busy: false, error: '', where: '', stage: '', candidates: [] as SniCandidate[] })
 const canFindSni = computed(() => !editing.value && fields.value.some((f) => f.key === 'server_name') &&
   typeof form.server === 'number' && props.servers.find((s) => s.id === form.server)?.status !== 'pending')
 async function findSni() {
-  Object.assign(sni, { busy: true, error: '', where: '', candidates: [] })
+  Object.assign(sni, { busy: true, error: '', where: '', stage: '面板正在查询网络测绘引擎…', candidates: [] })
   try {
-    const { task_id } = await api<{ task_id: number }>(`/api/servers/${form.server}/sni-find`, { method: 'POST' })
+    const q = await api<{ task_id: number; asn: number; country: string | null; found: number }>(
+      `/api/servers/${form.server}/sni-find`, { method: 'POST' })
+    sni.where = `AS${q.asn}${q.country ? ` ${q.country}` : ''}`
+    sni.stage = `找到 ${q.found} 个候选，服务器正在逐个做 TLS 握手检查…`
     const end = Date.now() + 6 * 60 * 1000
     while (Date.now() < end) {
       await new Promise((r) => setTimeout(r, 3000))
-      const t = await api<{ status: string; error?: string; result?: { asn?: number; country?: string; candidates?: SniCandidate[] } }>(`/api/tasks/${task_id}`)
+      const t = await api<{ status: string; error?: string; result?: { candidates?: SniCandidate[] } }>(`/api/tasks/${q.task_id}`)
       if (t.status === 'done') {
         sni.candidates = t.result?.candidates ?? []
-        sni.where = t.result?.asn ? `AS${t.result.asn} ${t.result.country ?? ''}` : ''
-        if (!sni.candidates.length) sni.error = '没有找到能用的伪装目标，请手动填写'
+        if (!sni.candidates.length) sni.error = `${q.found} 个候选都没通过 TLS 检查，请手动填写`
         return
       }
-      if (t.status === 'failed') { sni.error = t.error || '查询失败'; return }
+      if (t.status === 'failed') { sni.error = t.error || '检查失败'; return }
     }
     sni.error = '服务器没有及时回复（离线了吗？）'
   } catch (e) {
-    sni.error = e instanceof ApiError && e.errors.length ? e.errors.join('；') : String((e as Error).message)
+    sni.error = errorText(e)
   } finally {
-    sni.busy = false
+    Object.assign(sni, { busy: false, stage: '' })
   }
 }
 function pickSni(c: SniCandidate) {
@@ -127,6 +149,7 @@ async function submit() {
         body: JSON.stringify({ address: input.address, port: input.port, public_port: input.public_port,
           traffic_limit_gb: input.traffic_limit_gb, reset_day: resetDay, labels: input.labels, params: input.params }),
       })
+      toast(`已保存 ${props.node!.name}，正在下发到服务器`)
       emit('close')
       return
     }
@@ -148,16 +171,15 @@ async function submit() {
     busy.value = false
   }
 }
+const title = computed(() => (result.value ? '节点已保存' : editing.value ? `编辑节点 ${props.node!.name}` : '新建节点'))
+const subtitle = computed(() => result.value ? '' : editing.value
+  ? '修改会由 psm-agent 在服务器上生效；协议、运行方式、服务器和名称不能改。'
+  : '填写节点信息，提交后由 psm-agent 在服务器上建好（未接入的服务器会给出一键安装命令）。')
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')">
-    <div class="dialog" role="dialog" :aria-label="editing ? '编辑节点' : '新建节点'" style="position: relative">
-      <div class="dialog-head">
-        <div>
-          <h2>{{ editing ? `编辑节点 ${node!.name}` : '新建节点' }}</h2>
-          <p>{{ editing ? '修改会由 psm-agent 在服务器上生效；协议、运行方式、服务器和名称不能改。' : '填写节点信息，提交后生成一键安装命令。' }}</p>
-        </div>
+  <Modal :title="title" :subtitle="subtitle" @close="emit('close')">
+    <template #head>
         <div v-if="!result" class="proto-select">
           <button type="button" class="proto-button" data-test="protocol" :disabled="editing" @click="menuOpen = !menuOpen">
             <span v-if="protocol"><span class="dot" :style="{ background: protocol.color }" /> {{ protocol.label }}</span>
@@ -170,7 +192,7 @@ async function submit() {
             </button>
           </div>
         </div>
-      </div>
+    </template>
 
       <!-- after submitting: the result and the install command -->
       <div v-if="result" class="dialog-body" data-test="result">
@@ -187,8 +209,10 @@ async function submit() {
         </div>
       </div>
 
+      <div v-else-if="loading" class="dialog-body"><div class="skeleton-rows"><div v-for="i in 5" :key="i" class="skeleton" style="height: 34px" /></div></div>
       <form v-else class="dialog-body" @submit.prevent="submit">
         <ul v-if="errors.length" class="errors" data-test="errors"><li v-for="e in errors" :key="e">{{ e }}</li></ul>
+        <div v-if="!protocol" class="notice info">先在右上角选择协议类型。</div>
 
         <div v-if="protocol && protocol.variants.length > 1" class="field">
           <label>{{ protocol.label }} 类型</label>
@@ -282,10 +306,10 @@ async function submit() {
             <div v-if="f.help" class="help">{{ f.help }}</div>
           </div>
           <div v-if="canFindSni" class="field" data-test="sni-finder">
-            <button class="btn ghost" type="button" :disabled="sni.busy" data-test="find-sni" @click="findSni">
-              {{ sni.busy ? '服务器查询中…（约一分钟）' : '自动选择伪装目标（服务器所在网络）' }}
+            <button class="btn" type="button" :disabled="sni.busy" data-test="find-sni" @click="findSni">
+              <span v-if="sni.busy" class="spinner" />{{ sni.busy ? '查询中…（约一分钟）' : '自动选择伪装目标（服务器所在网络）' }}
             </button>
-            <div class="help">用系统设置里的网络测绘引擎，查服务器同一 ASN 里有证书的网站，逐个做 TLS 握手检查。</div>
+            <div class="help">{{ sni.stage || '面板用系统设置里的网络测绘引擎查服务器同一 ASN 里有证书的网站（API Key 不离开面板），服务器再逐个做 TLS 握手检查。' }}</div>
             <div v-if="sni.error" class="notice err" data-test="sni-error">{{ sni.error }}</div>
             <div v-if="sni.candidates.length" class="table-wrap">
               <div class="help">{{ sni.where }} 可用的伪装目标（按延迟排序）：</div>
@@ -303,15 +327,16 @@ async function submit() {
         <button type="submit" hidden />
       </form>
 
-      <div class="dialog-foot">
+    <template #foot>
         <template v-if="result">
           <button class="btn primary" type="button" data-test="done" @click="emit('close')">完成</button>
         </template>
         <template v-else>
           <button class="btn ghost" type="button" @click="emit('close')">取消</button>
-          <button class="btn primary" type="button" :disabled="busy" data-test="submit" @click="submit">{{ busy ? '提交中…' : editing ? '保存' : '提交' }}</button>
+          <button class="btn primary" type="button" :disabled="busy || loading" data-test="submit" @click="submit">
+            <span v-if="busy" class="spinner" />{{ busy ? '提交中…' : editing ? '保存' : '提交' }}
+          </button>
         </template>
-      </div>
-    </div>
-  </div>
+    </template>
+  </Modal>
 </template>

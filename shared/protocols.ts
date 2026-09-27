@@ -327,8 +327,9 @@ export function validateNode(n: NodeInput):
   const portOk = (p: unknown) => Number.isInteger(p) && (p as number) >= 1 && (p as number) <= 65535
   if (!portOk(n.port)) errors.push('服务端口：1-65535')
   if (n.public_port !== undefined && !portOk(n.public_port)) errors.push('连接端口：1-65535')
-  if (n.traffic_limit_gb !== undefined && !(Number.isFinite(n.traffic_limit_gb) && n.traffic_limit_gb >= 0))
-    errors.push('流量限制：不小于 0 的数字')
+  // bounded: 1e308 GB is finite, but not once it is counted in bytes
+  if (n.traffic_limit_gb !== undefined && !(Number.isFinite(n.traffic_limit_gb) && n.traffic_limit_gb >= 0 && n.traffic_limit_gb <= 1_000_000))
+    errors.push('流量限制：0-1000000 GB')
   if (n.mount_443 && !canMount443(n.engine, v.psm))
     errors.push(`${v.label} 用 ${ENGINE_LABELS[n.engine] ?? n.engine} 运行时不能挂到 443 复用`)
 

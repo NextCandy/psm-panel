@@ -1,36 +1,109 @@
 <script setup lang="ts">
+// 仪表盘: what is running, what needs a look, what happened lately — one
+// request (/api/overview), counted in D1, nothing decrypted.
 import { computed, onMounted, ref } from 'vue'
-import { api, formatBytes, type PanelNode, type Server } from '../api'
+import { api, ago, errorText, formatBytes, type AuditEntry } from '../api'
+import { usePoll, toast } from '../ui'
+import BarChart from '../components/BarChart.vue'
+import Icon from '../components/Icon.vue'
+import { actionLabel } from '../audit'
 
-const servers = ref<Server[]>([])
-const nodes = ref<PanelNode[]>([])
-const today = ref(0)
-onMounted(async () => {
-  const [s, n, t] = await Promise.all([
-    api<Server[]>('/api/servers'), api<PanelNode[]>('/api/nodes'),
-    api<{ daily: { day: string; bytes: number }[] }>('/api/traffic?days=1'),
-  ])
-  servers.value = s
-  nodes.value = n
-  today.value = t.daily.reduce((a, d) => a + d.bytes, 0)
-})
-const online = computed(() => servers.value.filter((s) => s.status === 'online').length)
-const applied = computed(() => nodes.value.filter((n) => n.status === 'applied').length)
-const failed = computed(() => nodes.value.filter((n) => n.status === 'failed').length)
-const month = computed(() => nodes.value.reduce((a, n) => a + (n.traffic_used || 0), 0))
+type Count = { status: string; n: number }
+type Overview = {
+  version: string
+  servers: Count[]
+  nodes: (Count & { used: number | null; paused: number | null })[]
+  relays: (Count & { bytes: number | null; paused: number | null; lossy: number | null })[]
+  daily: { day: string; bytes: number }[]
+  audit: AuditEntry[]
+  problems: { type: 'node' | 'relay'; id: number; name: string; server: string; error: string | null }[]
+}
+const o = ref<Overview | null>(null)
+async function load() {
+  try { o.value = await api<Overview>('/api/overview') } catch (e) { toast(errorText(e), 'err') }
+}
+onMounted(load)
+usePoll(load, 30000)
+
+const sum = <T extends Count>(rows: T[] | undefined, pick: (r: T) => number = (r) => r.n, only?: string[]) =>
+  (rows ?? []).filter((r) => !only || only.includes(r.status)).reduce((a, r) => a + (pick(r) || 0), 0)
+const serversTotal = computed(() => sum(o.value?.servers))
+const online = computed(() => sum(o.value?.servers, undefined, ['online']))
+const nodesTotal = computed(() => sum(o.value?.nodes))
+const running = computed(() => sum(o.value?.nodes, undefined, ['applied']))
+const failed = computed(() => sum(o.value?.nodes, undefined, ['failed']))
+const paused = computed(() => sum(o.value?.nodes, (r) => r.paused ?? 0))
+const month = computed(() => sum(o.value?.nodes, (r) => r.used ?? 0))
+const relaysTotal = computed(() => sum(o.value?.relays))
+const relaysUp = computed(() => sum(o.value?.relays, undefined, ['applied']))
+const relaysBad = computed(() => sum(o.value?.relays, undefined, ['failed']))
+const relaysPaused = computed(() => sum(o.value?.relays, (r) => r.paused ?? 0))
+const relaysLossy = computed(() => sum(o.value?.relays, (r) => r.lossy ?? 0))
+const today = computed(() => o.value?.daily.find((d) => d.day === new Date().toISOString().slice(0, 10))?.bytes ?? 0)
+const fortnight = computed(() => (o.value?.daily ?? []).reduce((a, d) => a + d.bytes, 0))
 </script>
 
 <template>
   <div class="page-head">
-    <div><h1>仪表盘</h1><p>服务器、节点和流量概况。</p></div>
+    <div><h1>仪表盘</h1><p>服务器、节点、中转和流量概况。</p></div>
+    <div class="page-actions"><button class="btn" type="button" @click="load"><Icon name="refresh" />刷新</button></div>
   </div>
-  <div class="stats">
-    <div class="card stat"><div class="n">{{ servers.length }}</div><div class="l">服务器</div></div>
-    <div class="card stat"><div class="n" data-test="online-count">{{ online }}</div><div class="l">在线服务器</div></div>
-    <div class="card stat"><div class="n">{{ nodes.length }}</div><div class="l">节点</div></div>
-    <div class="card stat"><div class="n">{{ applied }}</div><div class="l">运行中的节点</div></div>
-    <div class="card stat"><div class="n">{{ failed }}</div><div class="l">失败的节点</div></div>
-    <div class="card stat"><div class="n">{{ formatBytes(month) }}</div><div class="l">本月流量</div></div>
-    <div class="card stat"><div class="n">{{ formatBytes(today) }}</div><div class="l">今日流量</div></div>
+
+  <div v-if="!o" class="stats section">
+    <div v-for="i in 5" :key="i" class="card stat"><div class="skeleton" style="width: 60%" /><div class="skeleton" style="height: 26px; margin-top: 8px" /></div>
   </div>
+  <template v-else>
+    <div class="stats section">
+      <a class="card stat link" href="#/servers">
+        <span class="l"><Icon name="servers" />服务器</span>
+        <span class="n"><span data-test="online-count">{{ online }}</span><span class="faint" style="font-size: 16px"> / {{ serversTotal }}</span></span>
+        <span class="s">在线 / 全部</span>
+      </a>
+      <a class="card stat link" href="#/nodes">
+        <span class="l"><Icon name="nodes" />节点</span>
+        <span class="n">{{ running }}<span class="faint" style="font-size: 16px"> / {{ nodesTotal }}</span></span>
+        <span class="s">运行中<template v-if="failed"> · <b style="color: var(--err)">{{ failed }} 个失败</b></template><template v-if="paused"> · {{ paused }} 个超额暂停</template></span>
+      </a>
+      <a class="card stat link" href="#/relays">
+        <span class="l"><Icon name="relays" />中转</span>
+        <span class="n">{{ relaysUp }}<span class="faint" style="font-size: 16px"> / {{ relaysTotal }}</span></span>
+        <span class="s">运行中<template v-if="relaysBad"> · <b style="color: var(--err)">{{ relaysBad }} 条失败</b></template><template v-if="relaysPaused"> · {{ relaysPaused }} 条暂停</template><template v-if="relaysLossy"> · {{ relaysLossy }} 条丢包</template></span>
+      </a>
+      <a class="card stat link" href="#/traffic">
+        <span class="l"><Icon name="traffic" />本月流量</span>
+        <span class="n" data-test="dash-month">{{ formatBytes(month) }}</span>
+        <span class="s">今日 {{ formatBytes(today) }}</span>
+      </a>
+    </div>
+
+    <div class="grid-2 section">
+      <div class="card">
+        <div class="card-head"><h2>最近 14 天</h2><span class="muted">共 {{ formatBytes(fortnight) }}（按 UTC 日期）</span></div>
+        <BarChart :daily="o.daily" :days="14" test="dash-chart" />
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>需要处理</h2><span class="muted">{{ o.problems.length ? `${o.problems.length} 项` : '' }}</span></div>
+        <ul v-if="o.problems.length" class="list-plain" data-test="problems">
+          <li v-for="p in o.problems" :key="`${p.type}-${p.id}`">
+            <span class="badge err" style="margin: 0">{{ p.type === 'node' ? '节点' : '中转' }}</span>
+            <a :href="p.type === 'node' ? '#/nodes' : '#/relays'"><b>{{ p.server }}/{{ p.name }}</b></a>
+            <span class="muted small ellipsis" :title="p.error ?? ''">{{ p.error || '失败' }}</span>
+          </li>
+        </ul>
+        <div v-else class="empty"><div class="big">✓</div>一切正常</div>
+      </div>
+    </div>
+
+    <div class="card section">
+      <div class="card-head"><h2>最近操作</h2><a class="small" href="#/settings">全部记录</a></div>
+      <ul v-if="o.audit.length" class="list-plain">
+        <li v-for="e in o.audit" :key="e.id">
+          <b>{{ actionLabel(e.action) }}</b><span class="muted">{{ e.target }}</span>
+          <span class="faint small ellipsis">{{ e.detail }}</span>
+          <span class="when" :title="e.at">{{ ago(e.at) }}</span>
+        </li>
+      </ul>
+      <div v-else class="empty">暂无记录。</div>
+    </div>
+  </template>
 </template>

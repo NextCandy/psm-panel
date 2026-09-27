@@ -1,7 +1,7 @@
 -- PSM panel schema. Servers run psm-agent, which syncs with the panel; the
 -- panel keeps the nodes as entered and a queue of tasks for each server.
 
-CREATE TABLE servers (
+CREATE TABLE IF NOT EXISTS servers (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     name             TEXT NOT NULL UNIQUE,
     agent_token_hash TEXT UNIQUE,          -- SHA-256 of the agent token; NULL until the server joins
@@ -13,7 +13,7 @@ CREATE TABLE servers (
 );
 
 -- One-time join tokens for the install command; only their SHA-256 is kept.
-CREATE TABLE join_tokens (
+CREATE TABLE IF NOT EXISTS join_tokens (
     token_hash TEXT PRIMARY KEY,
     server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
     expires_at TEXT NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE join_tokens (
 
 -- Nodes as entered in the panel. params (passwords, keys) and the client link
 -- are stored encrypted (AES-GCM, key in the TOKEN_KEY Worker secret).
-CREATE TABLE nodes (
+CREATE TABLE IF NOT EXISTS nodes (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     server_id        INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
     protocol         TEXT NOT NULL,
@@ -44,7 +44,7 @@ CREATE TABLE nodes (
 );
 
 -- Tasks for psm-agent. The payload carries node settings, so it is encrypted.
-CREATE TABLE tasks (
+CREATE TABLE IF NOT EXISTS tasks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     server_id   INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
     node_id     INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
@@ -56,4 +56,4 @@ CREATE TABLE tasks (
     claimed_at  TEXT,
     finished_at TEXT
 );
-CREATE INDEX tasks_by_server ON tasks (server_id, status);
+CREATE INDEX IF NOT EXISTS tasks_by_server ON tasks (server_id, status);

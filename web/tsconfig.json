@@ -1,0 +1,17 @@
+{
+  // The pages, for vue-tsc (tests/e2e.sh runs it) and editors; the Worker
+  // and shared/ have the root tsconfig.json (npm run typecheck).
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "jsx": "preserve",
+    "paths": { "@shared/*": ["../shared/*"] },
+    "types": []
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue", "../shared/**/*.ts", "env.d.ts"]
+}

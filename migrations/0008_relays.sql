@@ -7,7 +7,7 @@
 -- The hop can be wrapped in TLS. Nothing secret lives here: the certificate
 -- and key stay on the server as paths, and the panel only records that TLS is
 -- on, for which name, and whether a self-signed certificate is accepted.
-CREATE TABLE relays (
+CREATE TABLE IF NOT EXISTS relays (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     server_id        INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
     name             TEXT NOT NULL,
@@ -25,8 +25,8 @@ CREATE TABLE relays (
 );
 
 -- one name per server, and one rule per listening port on that server
-CREATE UNIQUE INDEX relays_name ON relays (server_id, name);
-CREATE UNIQUE INDEX relays_port ON relays (server_id, listen_port);
+CREATE UNIQUE INDEX IF NOT EXISTS relays_name ON relays (server_id, name);
+CREATE UNIQUE INDEX IF NOT EXISTS relays_port ON relays (server_id, listen_port);
 
 -- A task belongs to a node or to a relay; node_id already exists.
 ALTER TABLE tasks ADD COLUMN relay_id INTEGER REFERENCES relays(id) ON DELETE SET NULL;

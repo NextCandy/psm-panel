@@ -1,0 +1,12 @@
+# The panel's pages (Workers static assets). The API sets its own headers in
+# the Worker; this file covers what the Worker never sees.
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+
+# Vite names these by their content: a changed file is a new name
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

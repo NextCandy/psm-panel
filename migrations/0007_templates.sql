@@ -1,6 +1,6 @@
 -- Subscription templates: the user's own (the built-in ones live in the
 -- Worker's code), and which template each subscription uses per format.
-CREATE TABLE templates (
+CREATE TABLE IF NOT EXISTS templates (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
     format     TEXT NOT NULL,              -- clash | stash | singbox | surge | quanx | loon

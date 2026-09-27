@@ -9,8 +9,11 @@
 // it wins and the stored record is rewritten, so changing the password in the
 // Cloudflare dashboard still works — and still signs everyone out.
 //
-// A signed cookie keeps the session for 7 days. Failed sign-ins are limited
-// per address: 10 in 15 minutes.
+// A signed cookie keeps the session for 7 days. It carries the session epoch
+// (a number in `settings`): signing out raises it, which ends every session
+// signed before — on every device, since a cookie cannot be taken back from a
+// browser that still has it. Failed sign-ins are limited per address (an
+// IPv6 address per /64, what one machine usually has): 10 in 15 minutes.
 import type { Env } from './index'
 
 const COOKIE = 'psm_session'
@@ -18,7 +21,14 @@ const SESSION_SECONDS = 7 * 24 * 3600
 const MAX_FAILURES = 10
 const FAILURE_WINDOW_MINUTES = 15
 const PW_SETTING = 'admin_pw'
+const EPOCH_SETTING = 'session_epoch'
+// Workers' WebCrypto refuses PBKDF2 above 100,000 iterations (the audit's
+// 210,000 cannot run here); the record keeps its own count, so a later
+// runtime can raise it and old records still verify.
 const PBKDF2_ROUNDS = 100_000
+// how long an isolate trusts the epoch it read: a sign-out elsewhere reaches
+// it within this, and at once in the isolate that handled it
+const EPOCH_TTL_MS = 15_000
 const enc = new TextEncoder()
 
 /** This isolate's stored record; `null` once looked for and not found. */
@@ -82,14 +92,47 @@ export async function syncAdminPassword(env: Env): Promise<void> {
 
 export const adminConfigured = (env: Env) => (env.ADMIN_PASSWORD ?? '').length >= 8 || !!stored
 
+/** ADMIN_PASSWORD is set but too short to be used (the page says so rather than "not set"). */
+export const passwordIgnored = (env: Env) => {
+  const n = (env.ADMIN_PASSWORD ?? '').length
+  return n > 0 && n < 8
+}
+
 // The signature must not depend on the plain password: after a deploy that
 // dropped the secret, only the stored record is left. TOKEN_KEY is stable (it
-// has its own fallback in D1), and mixing the record in keeps the old promise
-// that changing the password signs everyone out — a new password means a new
-// record, and every cookie signed with the old one stops verifying.
-function sessionKey(env: Env): Promise<CryptoKey> {
-  return crypto.subtle.importKey('raw', enc.encode(`psm-session\0${env.TOKEN_KEY}\0${stored ?? env.ADMIN_PASSWORD ?? ''}`),
-    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
+// has its own fallback in D1), and the record as the salt keeps the old
+// promise that changing the password signs everyone out — a new password
+// means a new record, and every cookie signed with the old one stops
+// verifying. HKDF gives the session its own key: TOKEN_KEY itself only ever
+// encrypts (AES-GCM), and nothing signs with it directly.
+let keyCache: { tokenKey: string; record: string; key: CryptoKey } | null = null
+async function sessionKey(env: Env): Promise<CryptoKey> {
+  const record = stored ?? env.ADMIN_PASSWORD ?? ''
+  if (keyCache && keyCache.tokenKey === env.TOKEN_KEY && keyCache.record === record) return keyCache.key
+  const ikm = await crypto.subtle.importKey('raw', unb64(env.TOKEN_KEY), 'HKDF', false, ['deriveKey'])
+  const key = await crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode(record), info: enc.encode('psm-panel session v2') },
+    ikm, { name: 'HMAC', hash: 'SHA-256', length: 256 }, false, ['sign', 'verify'])
+  keyCache = { tokenKey: env.TOKEN_KEY, record, key }
+  return key
+}
+
+/** TOKEN_KEY's bytes (standard base64, as crypto.ts reads it). */
+const unb64 = (s: string) => Uint8Array.from(atob(s), (ch) => ch.charCodeAt(0))
+
+let epochCache: { value: number; at: number } | null = null
+async function currentEpoch(db: D1Database, fresh = false): Promise<number> {
+  if (!fresh && epochCache && Date.now() - epochCache.at < EPOCH_TTL_MS) return epochCache.value
+  const row = await db.prepare('SELECT value FROM settings WHERE key = ?').bind(EPOCH_SETTING).first<{ value: string }>()
+  epochCache = { value: Number.parseInt(row?.value ?? '0', 10) || 0, at: Date.now() }
+  return epochCache.value
+}
+
+/** Ends every session signed so far (sign-out, on every device). */
+export async function revokeSessions(db: D1Database): Promise<void> {
+  await db.prepare(`INSERT INTO settings (key, value) VALUES (?, '1')
+    ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`).bind(EPOCH_SETTING).run()
+  await currentEpoch(db, true)
 }
 
 export async function passwordMatches(env: Env, given: string): Promise<boolean> {
@@ -104,10 +147,12 @@ export async function passwordMatches(env: Env, given: string): Promise<boolean>
 
 const attrs = (secure: boolean) => `Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`
 
+// <expiry>.<epoch>.<signature of both>
 export async function sessionCookie(env: Env, secure: boolean): Promise<string> {
   const exp = Math.floor(Date.now() / 1000) + SESSION_SECONDS
-  const sig = await crypto.subtle.sign('HMAC', await sessionKey(env), enc.encode(`v1.${exp}`))
-  return `${COOKIE}=${exp}.${b64url(sig)}; Max-Age=${SESSION_SECONDS}; ${attrs(secure)}`
+  const epoch = await currentEpoch(env.DB, true)
+  const sig = await crypto.subtle.sign('HMAC', await sessionKey(env), enc.encode(`v2.${exp}.${epoch}`))
+  return `${COOKIE}=${exp}.${epoch}.${b64url(sig)}; Max-Age=${SESSION_SECONDS}; ${attrs(secure)}`
 }
 
 export const clearedCookie = (secure: boolean) => `${COOKIE}=; Max-Age=0; ${attrs(secure)}`
@@ -115,10 +160,26 @@ export const clearedCookie = (secure: boolean) => `${COOKIE}=; Max-Age=0; ${attr
 export async function validSession(env: Env, cookieHeader: string | undefined): Promise<boolean> {
   if (!adminConfigured(env) || !cookieHeader) return false
   const value = cookieHeader.split(/;\s*/).find((p) => p.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1) ?? ''
-  const m = /^(\d{10})\.([A-Za-z0-9_-]{43})$/.exec(value)
+  const m = /^(\d{10})\.(\d{1,12})\.([A-Za-z0-9_-]{43})$/.exec(value)
   if (!m || Number(m[1]) < Date.now() / 1000) return false
-  const sig = Uint8Array.from(atob(m[2].replace(/-/g, '+').replace(/_/g, '/') + '='), (ch) => ch.charCodeAt(0))
-  return crypto.subtle.verify('HMAC', await sessionKey(env), sig, enc.encode(`v1.${m[1]}`))
+  const sig = unb64url(m[3])
+  if (!(await crypto.subtle.verify('HMAC', await sessionKey(env), sig, enc.encode(`v2.${m[1]}.${m[2]}`)))) return false
+  // a cookie newer than this isolate's epoch means the epoch moved on since it was read
+  const cookieEpoch = Number(m[2])
+  let epoch = await currentEpoch(env.DB)
+  if (cookieEpoch > epoch) epoch = await currentEpoch(env.DB, true)
+  return cookieEpoch === epoch
+}
+
+/** The address failed sign-ins are counted by: an IPv6 address by its /64. */
+export function ipKey(ip: string): string {
+  if (!ip.includes(':')) return ip
+  // expand "::" to get the first four groups
+  const [head, tail = ''] = ip.toLowerCase().split('::')
+  const h = head ? head.split(':') : []
+  const t = tail ? tail.split(':') : []
+  const groups = ip.includes('::') ? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t] : h
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, '')).join(':')}::/64`
 }
 
 export async function tooManyFailures(db: D1Database, ip: string): Promise<boolean> {

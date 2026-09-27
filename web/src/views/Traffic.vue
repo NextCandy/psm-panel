@@ -1,93 +1,126 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { api, formatBytes, localTime, GB } from '../api'
+import { api, errorText, formatBytes, GB, localTime, ago } from '../api'
+import { confirmAction, toast, usePoll } from '../ui'
+import BarChart from '../components/BarChart.vue'
+import Icon from '../components/Icon.vue'
 
 type Row = {
   id: number; name: string; server: string; engine: string; status: string
   traffic_used: number; traffic_limit_gb: number; traffic_paused: boolean; traffic_at: string | null; reset_day: number
 }
 const data = ref<{ days: number; nodes: Row[]; daily: { day: string; bytes: number }[] } | null>(null)
-const message = ref('')
-
 async function load() {
-  data.value = await api('/api/traffic?days=30')
+  try { data.value = await api('/api/traffic?days=30') } catch (e) { toast(errorText(e), 'err') }
 }
 onMounted(load)
+usePoll(load, 60000)
 
 // servers report every ten minutes; this asks them now
 const refreshing = ref(false)
 async function refresh() {
   refreshing.value = true
   try {
-    await api('/api/traffic/refresh', { method: 'POST' })
-    await new Promise((r) => setTimeout(r, 8000))
+    const r = await api<{ servers: number }>('/api/traffic/refresh', { method: 'POST' })
+    toast(`已向 ${r.servers} 台服务器要最新计数，几秒后更新`, 'info')
+    await new Promise((res) => setTimeout(res, 8000))
     await load()
+  } catch (e) {
+    toast(errorText(e), 'err')
   } finally {
     refreshing.value = false
   }
 }
 
-// the last 30 days, one bar each (days without traffic included)
-const bars = computed(() => {
-  const byDay = new Map((data.value?.daily ?? []).map((d) => [d.day, d.bytes]))
-  const out: { day: string; bytes: number }[] = []
-  for (let i = 29; i >= 0; i--) {
-    const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10)
-    out.push({ day: d, bytes: byDay.get(d) ?? 0 })
-  }
-  return out
-})
-const peak = computed(() => Math.max(1, ...bars.value.map((b) => b.bytes)))
-const month = computed(() => (data.value?.nodes ?? []).reduce((a, n) => a + n.traffic_used, 0))
-const today = computed(() => bars.value[bars.value.length - 1]?.bytes ?? 0)
-const paused = computed(() => (data.value?.nodes ?? []).filter((n) => n.traffic_paused).length)
+const q = ref('')
+type Key = 'name' | 'server' | 'traffic_used' | 'pct'
+const sortKey = ref<Key>('traffic_used')
+const sortDesc = ref(true)
 const pct = (n: Row) => (n.traffic_limit_gb > 0 ? Math.min(100, (n.traffic_used / (n.traffic_limit_gb * GB)) * 100) : 0)
+function sortBy(k: Key) {
+  if (sortKey.value === k) sortDesc.value = !sortDesc.value
+  else { sortKey.value = k; sortDesc.value = k !== 'name' && k !== 'server' }
+}
+const rows = computed(() => {
+  const needle = q.value.trim().toLowerCase()
+  const val = (n: Row) => (sortKey.value === 'pct' ? pct(n) : n[sortKey.value])
+  return (data.value?.nodes ?? [])
+    .filter((n) => !needle || n.name.toLowerCase().includes(needle) || n.server.toLowerCase().includes(needle))
+    .sort((a, b) => {
+      const x = val(a), y = val(b)
+      const c = typeof x === 'string' ? x.localeCompare(String(y)) : Number(x) - Number(y)
+      return sortDesc.value ? -c : c
+    })
+})
+const month = computed(() => (data.value?.nodes ?? []).reduce((a, n) => a + n.traffic_used, 0))
+const today = computed(() => data.value?.daily.find((d) => d.day === new Date().toISOString().slice(0, 10))?.bytes ?? 0)
+const paused = computed(() => (data.value?.nodes ?? []).filter((n) => n.traffic_paused).length)
+const arrow = (k: Key) => (sortKey.value === k ? (sortDesc.value ? ' ↓' : ' ↑') : '')
 
 async function reset(n: Row) {
-  if (!confirm(`把 ${n.name} 的流量从 0 重新计算？超额暂停的节点会恢复。`)) return
+  if (!(await confirmAction({ title: `重置 ${n.name} 的流量？`, body: '从 0 重新计算；超额暂停的节点会恢复。', ok: '重置' }))) return
   try {
     await api(`/api/nodes/${n.id}/traffic/reset`, { method: 'POST' })
-    message.value = `已通知 ${n.server}，几秒后生效。`
+    toast(`已通知 ${n.server}，几秒后生效`)
     setTimeout(load, 6000)
   } catch (e) {
-    message.value = (e as Error).message
+    toast(errorText(e), 'err')
   }
 }
 </script>
 
 <template>
   <div class="page-head">
-    <div><h1>流量</h1></div>
-    <button class="btn" :disabled="refreshing" data-test="traffic-refresh" @click="refresh">{{ refreshing ? '正在向服务器获取…' : '立即刷新' }}</button>
-  </div>
-  <div v-if="message" class="notice ok">{{ message }}</div>
-  <div class="stats" style="margin-bottom: 16px">
-    <div class="card stat"><div class="n" data-test="traffic-month">{{ formatBytes(month) }}</div><div class="l">本月总流量</div></div>
-    <div class="card stat"><div class="n">{{ formatBytes(today) }}</div><div class="l">今日流量</div></div>
-    <div class="card stat"><div class="n">{{ paused }}</div><div class="l">超额暂停的节点</div></div>
-  </div>
-  <div class="card chart" data-test="traffic-chart">
-    <div v-for="b in bars" :key="b.day" class="bar" :title="`${b.day}：${formatBytes(b.bytes)}`">
-      <span :style="{ height: `${(b.bytes / peak) * 100}%` }" />
+    <div><h1>流量</h1><p>各服务器每 10 分钟上报一次计数。每天的统计按 UTC 日期；每月重置按各服务器自己的时区，在它的重置日零点。</p></div>
+    <div class="page-actions">
+      <button class="btn" :disabled="refreshing" data-test="traffic-refresh" @click="refresh">
+        <span v-if="refreshing" class="spinner" /><Icon v-else name="refresh" />{{ refreshing ? '正在向服务器获取…' : '立即刷新' }}
+      </button>
     </div>
   </div>
-  <div class="card table-wrap" style="margin-top: 16px">
-    <table>
-      <thead><tr><th>节点</th><th>服务器</th><th>本月已用</th><th>上限</th><th style="min-width: 160px">用量</th><th>重置日</th><th>状态</th><th>更新于</th><th>操作</th></tr></thead>
-      <tbody>
-        <tr v-for="n in data?.nodes ?? []" :key="n.id" :data-test="`traffic-${n.name}`">
-          <td>{{ n.name }}</td>
-          <td>{{ n.server }}</td>
-          <td>{{ formatBytes(n.traffic_used) }}</td>
-          <td>{{ n.traffic_limit_gb ? `${n.traffic_limit_gb} GB` : '不限' }}</td>
-          <td><div class="meter"><span :class="{ over: pct(n) >= 90 }" :style="{ width: `${pct(n)}%` }" /></div></td>
-          <td>每月 {{ n.reset_day }} 日</td>
-          <td><span class="status" :class="n.traffic_paused ? 'failed' : 'applied'"><span class="dot" />{{ n.traffic_paused ? '已暂停' : '正常' }}</span></td>
-          <td>{{ localTime(n.traffic_at) }}</td>
-          <td><button class="btn small ghost" :disabled="n.status !== 'applied'" @click="reset(n)">重置</button></td>
-        </tr>
-      </tbody>
-    </table>
-    <div v-if="data && !data.nodes.length" class="empty">还没有节点。</div>
+  <div class="stats section">
+    <div class="card stat"><span class="l">本月总流量</span><span class="n" data-test="traffic-month">{{ formatBytes(month) }}</span></div>
+    <div class="card stat"><span class="l">今日流量（UTC）</span><span class="n">{{ formatBytes(today) }}</span></div>
+    <div class="card stat"><span class="l">超额暂停的节点</span><span class="n" :style="{ color: paused ? 'var(--warn)' : '' }">{{ paused }}</span></div>
+  </div>
+  <div class="card section">
+    <div class="card-head"><h2>最近 30 天</h2></div>
+    <BarChart :daily="data?.daily ?? []" :days="30" test="traffic-chart" />
+  </div>
+  <div class="card">
+    <div class="toolbar">
+      <input v-model="q" class="input search" type="search" placeholder="搜索节点或服务器">
+      <span class="grow" /><span class="muted">{{ rows.length }} 个节点</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th class="sortable" @click="sortBy('name')">节点{{ arrow('name') }}</th>
+          <th class="sortable" @click="sortBy('server')">服务器{{ arrow('server') }}</th>
+          <th class="sortable num" @click="sortBy('traffic_used')">本月已用{{ arrow('traffic_used') }}</th>
+          <th class="num">上限</th>
+          <th class="sortable" style="min-width: 150px" @click="sortBy('pct')">用量{{ arrow('pct') }}</th>
+          <th>重置日</th><th>状态</th><th>更新于</th><th class="actions">操作</th>
+        </tr></thead>
+        <tbody>
+          <tr v-for="n in rows" :key="n.id" :data-test="`traffic-${n.name}`">
+            <td><b>{{ n.name }}</b></td>
+            <td>{{ n.server }}</td>
+            <td class="num">{{ formatBytes(n.traffic_used) }}</td>
+            <td class="num">{{ n.traffic_limit_gb ? `${n.traffic_limit_gb} GB` : '不限' }}</td>
+            <td>
+              <div v-if="n.traffic_limit_gb" class="meter"><span :class="{ over: pct(n) >= 80, full: pct(n) >= 100 }" :style="{ width: `${pct(n)}%` }" /></div>
+              <span v-else class="faint">—</span>
+            </td>
+            <td>每月 {{ n.reset_day }} 日</td>
+            <td><span class="status" :class="n.traffic_paused ? 'failed' : 'applied'"><span class="dot" />{{ n.traffic_paused ? '已暂停' : '正常' }}</span></td>
+            <td :title="localTime(n.traffic_at)">{{ ago(n.traffic_at) }}</td>
+            <td class="actions"><button class="btn small ghost" :disabled="n.status !== 'applied'" @click="reset(n)"><Icon name="refresh" />重置</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-if="!data" class="skeleton-rows"><div v-for="i in 3" :key="i" class="skeleton" style="height: 22px" /></div>
+      <div v-else-if="!data.nodes.length" class="empty">还没有节点。</div>
+    </div>
   </div>
 </template>
