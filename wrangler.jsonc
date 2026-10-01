@@ -19,6 +19,9 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Run the Worker near its D1 database rather than near each visitor: a page
+  // of the panel makes several queries, each one a round trip to D1.
+  "placement": { "mode": "smart" },
   "observability": { "enabled": true }
   // Secrets (never in this file): ADMIN_PASSWORD (required), TOKEN_KEY (optional)
 }

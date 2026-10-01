@@ -15,6 +15,7 @@ import m0009 from '../../migrations/0009_relay_samples.sql'
 import m0010 from '../../migrations/0010_mount_443.sql'
 import m0011 from '../../migrations/0011_relays_gost.sql'
 import m0012 from '../../migrations/0012_audit.sql'
+import m0013 from '../../migrations/0013_ipcheck.sql'
 
 const MIGRATIONS: [name: string, sql: string][] = [
   ['0001_init.sql', m0001],
@@ -29,6 +30,7 @@ const MIGRATIONS: [name: string, sql: string][] = [
   ['0010_mount_443.sql', m0010],
   ['0011_relays_gost.sql', m0011],
   ['0012_audit.sql', m0012],
+  ['0013_ipcheck.sql', m0013],
 ]
 
 let ready: Promise<void> | null = null

@@ -4,11 +4,13 @@ import { RELAY_PORTS } from '@shared/relays'
 import { ago, api, errorText, formatBytes, localTime, type Server } from '../api'
 import { confirmAction, toast, usePoll } from '../ui'
 import InstallCommand from '../components/InstallCommand.vue'
+import IpCheckDialog from '../components/IpCheckDialog.vue'
 import Modal from '../components/Modal.vue'
 import RowMenu from '../components/RowMenu.vue'
 import Icon from '../components/Icon.vue'
 
 const servers = ref<Server[]>([])
+const ipcheck = ref<Server | null>(null)
 const loaded = ref(false)
 async function load() {
   try { servers.value = await api<Server[]>('/api/servers') } catch (e) { toast(errorText(e), 'err') } finally { loaded.value = true }
@@ -205,6 +207,7 @@ const counts = computed(() => ({
                 <RowMenu :test="`more-${s.name}`">
                   <button v-if="outdated(s)" type="button" :disabled="s.status !== 'online'" :data-test="`upgrade-agent-${s.name}`" @click="upgrade(s)"><Icon name="upload" />升级 psm-agent</button>
                   <button v-else type="button" :disabled="s.status !== 'online'" :data-test="`update-psm-${s.name}`" @click="upgrade(s)"><Icon name="upload" />更新 PSM</button>
+                  <button type="button" :disabled="s.status !== 'online'" :data-test="`ipcheck-${s.name}`" @click="ipcheck = s"><Icon name="nodes" />IP 质量与解锁</button>
                   <button type="button" :data-test="`edit-server-${s.name}`" @click="openEdit(s)"><Icon name="edit" />备注和中转端口段</button>
                   <hr>
                   <button type="button" class="danger" :data-test="`remove-${s.name}`" @click="remove(s)"><Icon name="trash" />{{ leavingLong(s) ? '只从面板移除' : '移除' }}</button>
@@ -274,6 +277,8 @@ const counts = computed(() => ({
       <button class="btn primary" type="button" :disabled="edit.busy" data-test="save-server" @click="saveEdit">保存</button>
     </template>
   </Modal>
+
+  <IpCheckDialog v-if="ipcheck" :server="ipcheck" @close="ipcheck = null" />
 
   <!-- diagnostics -->
   <Modal v-if="diag" :title="`${diag.server.name} 的诊断`" @close="closeDiag">

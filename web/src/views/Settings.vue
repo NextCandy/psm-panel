@@ -9,6 +9,7 @@ type Settings = {
   version: string; agent_version: string; panel_url: string; effective_panel_url: string; sync_interval: number
   token_key: 'panel' | 'secret' | 'both' | 'mismatch'
   sni_engine: string; sni_key_set: boolean
+  ipcheck_keys: Record<string, boolean>
 }
 const settings = ref<Settings | null>(null)
 async function load() {
@@ -92,6 +93,28 @@ async function clearSniKey() {
     await load()
   } catch (e) {
     toast(errorText(e), 'err')
+  }
+}
+
+// ── the IP check's optional databases (their free API keys) ─────────────────
+const IPCHECK_DBS = [
+  { id: 'abuseipdb', label: 'AbuseIPDB', help: '滥用置信度、使用类型、Tor', url: 'https://www.abuseipdb.com/account/api' },
+  { id: 'ipqs', label: 'IPQualityScore', help: '欺诈分、代理、VPN、Tor、近期滥用、机器人', url: 'https://www.ipqualityscore.com/create-account' },
+  { id: 'ip2location', label: 'IP2Location.io', help: '额度更高；付费套餐还有使用类型和代理细项', url: 'https://www.ip2location.io/sign-up' },
+]
+const ipKeys = reactive<Record<string, string>>({ abuseipdb: '', ipqs: '', ip2location: '' })
+const ipKeysError = ref('')
+async function saveIpKeys(clear?: string) {
+  ipKeysError.value = ''
+  const body = clear ? { [clear]: '' } : Object.fromEntries(Object.entries(ipKeys).filter(([, v]) => v.trim()))
+  if (!Object.keys(body).length) return
+  try {
+    await api('/api/settings', { method: 'PUT', body: JSON.stringify({ ipcheck_keys: body }) })
+    for (const k of Object.keys(ipKeys)) ipKeys[k] = ''
+    toast(clear ? '已清除' : '已保存。之后的 IP 检测会多这几家数据库')
+    await load()
+  } catch (e) {
+    ipKeysError.value = errorText(e)
   }
 }
 
@@ -185,6 +208,20 @@ async function signOutEverywhere() {
           <button v-if="settings.sni_key_set" class="link-btn" type="button" @click="clearSniKey">清除 Key</button></div>
       </form>
     </div>
+    <div class="card card-pad" data-test="ipcheck-keys">
+      <form class="field" style="margin: 0" @submit.prevent="saveIpKeys()">
+        <label>IP 质量检测的数据库（可选）</label>
+        <div v-for="d in IPCHECK_DBS" :key="d.id" class="ipk">
+          <span class="ipk-name"><a :href="d.url" target="_blank" rel="noopener noreferrer">{{ d.label }}</a></span>
+          <input v-model="ipKeys[d.id]" class="input" type="password" autocomplete="off" :data-test="`ipcheck-key-${d.id}`"
+                 :placeholder="settings.ipcheck_keys?.[d.id] ? '已保存（留空不修改）' : `API Key：${d.help}`">
+          <button v-if="settings.ipcheck_keys?.[d.id]" class="link-btn" type="button" @click="saveIpKeys(d.id)">清除</button>
+        </div>
+        <div v-if="ipKeysError" class="error-text">{{ ipKeysError }}</div>
+        <div class="help">不填也能检测。填了免费 Key，服务器页的「IP 质量与解锁」会多这几家的风险分和风险因子。Key 加密保存，检测时经标准输入交给服务器。</div>
+        <div><button class="btn primary" type="submit" data-test="save-ipcheck-keys">保存</button></div>
+      </form>
+    </div>
     <div class="card card-pad">
       <div class="field-label">登录</div>
       <p class="muted" style="margin: 0 0 12px">登录保持 7 天。退出登录会让所有设备上的登录一起失效；修改 ADMIN_PASSWORD 也一样。</p>
@@ -192,3 +229,8 @@ async function signOutEverywhere() {
     </div>
   </div>
 </template>
+
+<style scoped>
+.ipk { display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-bottom: 8px }
+.ipk-name { font-size: 13px }
+</style>

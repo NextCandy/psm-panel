@@ -20,12 +20,12 @@ import { findSniCandidates, SNI_ENGINES } from './sni'
 // not exported: every export of a Worker's main module is taken for an entrypoint
 // Shown in 系统设置 as 面板版本; bump it whenever the panel gains something, so
 // that it answers "did my deploy take effect?" — the only marker a user has.
-const PANEL_VERSION = '0.8.3'
+const PANEL_VERSION = '0.9.0'
 
 // The psm-agent release this panel expects its servers to run: the 服务器 page
 // offers an upgrade to every joined server reporting anything else. Bump it
 // together with the agent-v… release the panel's install command installs.
-const AGENT_VERSION = '0.11.0'
+const AGENT_VERSION = '0.12.0'
 
 export type Env = {
   DB: D1Database
@@ -51,6 +51,7 @@ type ServerRow = {
   leaving: number; leave_error: string | null
   relay_port_min: number | null; relay_port_max: number | null; last_ip: string | null
   asn: number | null; country: string | null; sync_window: string | null; sync_count: number
+  check_enc: string | null; check_at: string | null; check_error: string | null
 }
 type NodeRow = {
   id: number; server_id: number; protocol: string; variant: string; engine: string; psm_protocol: string
@@ -510,6 +511,36 @@ app.get('/api/servers/:id/status', async (c) => {
   return c.json({ at: s.status_at, pending, report })
 })
 
+// ── the IP quality and unlock check (psm check, jinqians/ipcheck) ────────────
+// The server runs it and reports; the last report stays on the server row.
+app.post('/api/servers/:id/check', async (c) => {
+  const s = await getServer(c.env, c.req.param('id'))
+  if (!s) return c.json(fail('not_found', 'no such server'), 404)
+  if (!s.agent_token_hash) return c.json(fail('not_joined', '服务器还没有接入面板'), 409)
+  if (!versionAtLeast(s.agent_version, CHECK_AGENT))
+    return c.json(fail('agent_too_old', `${s.name} 的 psm-agent 是 ${s.agent_version ?? '旧版'}，IP 检测要 ${CHECK_AGENT} 以上：先在 ⋯ 里升级 psm-agent`), 409)
+  const body = await c.req.json<{ family?: unknown }>().catch(() => ({} as { family?: unknown }))
+  const family = body.family === '4' || body.family === '6' ? body.family : ''
+  if (await c.env.DB.prepare(`SELECT 1 FROM tasks WHERE server_id = ? AND kind = 'check.run' AND status IN ('queued', 'running') LIMIT 1`).bind(s.id).first())
+    return c.json({ status: 'queued' }, 202)   // one is on its way already
+  const keys = await ipcheckKeys(c.env)
+  const data = { ...(family ? { family } : {}), ...(Object.keys(keys).length ? { keys } : {}) }
+  await enqueue(c.env, s.id, null, { kind: 'check.run', ...(Object.keys(data).length ? { data } : {}) })
+  await audit(c.env, 'server.check', s.name, family ? `IPv${family}` : '')
+  return c.json({ status: 'queued' }, 202)
+})
+
+app.get('/api/servers/:id/check', async (c) => {
+  const s = await getServer(c.env, c.req.param('id'))
+  if (!s) return c.json(fail('not_found', 'no such server'), 404)
+  const pending = !!(await c.env.DB.prepare(`SELECT 1 FROM tasks WHERE server_id = ? AND kind = 'check.run' AND status IN ('queued', 'running') LIMIT 1`)
+    .bind(s.id).first())
+  const report = s.check_enc ? JSON.parse(await decrypt(c.env.TOKEN_KEY, s.check_enc)) : null
+  return c.json({ at: s.check_at, pending, report, error: s.check_error,
+    // what the server needs first, if anything
+    needs: !s.agent_token_hash ? 'join' : versionAtLeast(s.agent_version, CHECK_AGENT) ? null : CHECK_AGENT })
+})
+
 // ── nodes ────────────────────────────────────────────────────────────────────
 // The list carries no settings (GET /api/nodes/:id does): decrypting every
 // node's for a table that shows none of them was most of the list's cost.
@@ -725,6 +756,8 @@ app.post('/api/nodes/:id/traffic/reset', async (c) => {
 // same as it is typed. Anything beyond a plain realm forward to one host needs psm-agent 0.11.0 (and
 // the PSM it comes with) on the servers involved.
 const RELAY_AGENT = '0.11.0'
+// psm check (the IP quality and unlock check) came with psm-agent 0.12.0
+const CHECK_AGENT = '0.12.0'
 
 type RelayTarget = { host: string; port: number; server_id: number | null }
 type RelayInput = {
@@ -1485,7 +1518,21 @@ app.get('/api/settings', async (c) => c.json({
   token_key: await tokenKeyState(c.env),
   sni_engine: (await getSetting(c.env, 'sni_engine')) ?? 'netlas',
   sni_key_set: !!(await getSetting(c.env, 'sni_key_enc')),
+  ipcheck_keys: Object.fromEntries(await Promise.all(IPCHECK_KEYS.map(async (k) => [k, !!(await getSetting(c.env, `ipcheck_key_${k}_enc`))]))),
 }))
+
+// The IP check's optional databases, by their free API keys (kept encrypted;
+// they go to a server with each check, on psm-agent's stdin, never in argv)
+const IPCHECK_KEYS = ['abuseipdb', 'ipqs', 'ip2location'] as const
+const IPCHECK_KEY_RE = /^[A-Za-z0-9_-]{8,128}$/
+async function ipcheckKeys(env: Env): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  for (const k of IPCHECK_KEYS) {
+    const enc = await getSetting(env, `ipcheck_key_${k}_enc`)
+    if (enc) out[k] = await decrypt(env.TOKEN_KEY, enc)
+  }
+  return out
+}
 
 const putSetting = (env: Env, key: string, value: string) =>
   env.DB.prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(key, value).run()
@@ -1510,12 +1557,23 @@ function panelUrlProblem(url: string): string | null {
 // mapping engine for REALITY camouflage targets with its API key (kept
 // encrypted; the panel queries the engine itself, the key never leaves it).
 app.put('/api/settings', async (c) => {
-  const body = await c.req.json<{ panel_url?: unknown; sni_engine?: unknown; sni_key?: unknown }>().catch(() => null)
+  const body = await c.req.json<{ panel_url?: unknown; sni_engine?: unknown; sni_key?: unknown; ipcheck_keys?: unknown }>().catch(() => null)
   if (!body || typeof body !== 'object') return c.json(fail('invalid', 'bad request'), 400)
   const invalid = (m: string) => c.json(fail('invalid', m, { errors: [m] }), 400)
   if (body.sni_engine !== undefined && !SNI_ENGINES.includes(String(body.sni_engine))) return invalid('网络测绘引擎：Netlas、Quake、ZoomEye 或 FOFA')
   const key = body.sni_key === undefined ? undefined : String(body.sni_key).trim()
   if (key !== undefined && (key.length > 512 || /[\r\n]/.test(key))) return invalid('API Key 不正确')
+  // the IP check's keys: each one sent is saved ('' clears it)
+  const ipKeys: [string, string][] = []
+  if (body.ipcheck_keys !== undefined) {
+    if (!body.ipcheck_keys || typeof body.ipcheck_keys !== 'object') return invalid('IP 检测的 API Key 不正确')
+    for (const [k, v] of Object.entries(body.ipcheck_keys as Record<string, unknown>)) {
+      const value = String(v ?? '').trim()
+      if (!(IPCHECK_KEYS as readonly string[]).includes(k)) return invalid(`没有这个数据库：${k}`)
+      if (value && !IPCHECK_KEY_RE.test(value)) return invalid(`${k} 的 API Key 只含字母、数字、- 和 _（8-128 位）`)
+      ipKeys.push([k, value])
+    }
+  }
   if (body.panel_url !== undefined) {
     const url = String(body.panel_url).trim().replace(/\/+$/, '')
     const problem = url ? panelUrlProblem(url) : null
@@ -1532,6 +1590,11 @@ app.put('/api/settings', async (c) => {
     if (key) await putSetting(c.env, 'sni_key_enc', await encrypt(c.env.TOKEN_KEY, key))
     else await c.env.DB.prepare(`DELETE FROM settings WHERE key = 'sni_key_enc'`).run()
     await audit(c.env, 'settings.update', 'sni_key', key ? '已更新' : '已清除')
+  }
+  for (const [k, value] of ipKeys) {
+    if (value) await putSetting(c.env, `ipcheck_key_${k}_enc`, await encrypt(c.env.TOKEN_KEY, value))
+    else await c.env.DB.prepare('DELETE FROM settings WHERE key = ?').bind(`ipcheck_key_${k}_enc`).run()
+    await audit(c.env, 'settings.update', `ipcheck_key_${k}`, value ? '已更新' : '已清除')
   }
   return c.json({ panel_url: (await getSetting(c.env, 'panel_url')) ?? '', effective_panel_url: await panelUrl(c) })
 })
@@ -1727,6 +1790,15 @@ async function applyResult(env: Env, server: ServerRow, t: TaskRow, r: AgentResu
         const version = (r.output as { psm_version?: unknown }).psm_version
         await db.prepare(`UPDATE servers SET status_enc = ?, status_at = datetime('now'), psm_version = COALESCE(?, psm_version) WHERE id = ?`)
           .bind(await encrypt(env.TOKEN_KEY, report.slice(0, 512 * 1024)), typeof version === 'string' ? version.slice(0, 40) : null, server.id).run()
+      }
+      return
+    case 'check.run':
+      if (r.ok && r.output && typeof r.output === 'object') {
+        await db.prepare(`UPDATE servers SET check_enc = ?, check_at = datetime('now'), check_error = NULL WHERE id = ?`)
+          .bind(await encrypt(env.TOKEN_KEY, JSON.stringify(r.output).slice(0, 64 * 1024)), server.id).run()
+      } else {
+        await db.prepare(`UPDATE servers SET check_error = ?, check_at = datetime('now') WHERE id = ?`)
+          .bind(error ?? '服务器没有返回检测结果', server.id).run()
       }
       return
     case 'node.add': case 'standalone.install':
