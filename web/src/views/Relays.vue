@@ -8,7 +8,9 @@ import { ago, api, errorText, formatBytes, GB, localTime, NODE_STATUS, parseTime
 import { confirmAction, toast, usePoll } from '../ui'
 import RelayDialog from '../components/RelayDialog.vue'
 import RowMenu from '../components/RowMenu.vue'
+import TimeSeries from '../components/TimeSeries.vue'
 import Icon from '../components/Icon.vue'
+import { byteTick, byteTicks, niceTicks, type Panel } from '../chart'
 
 const relays = ref<Relay[]>([])
 const servers = ref<Server[]>([])
@@ -90,31 +92,17 @@ async function pickWindow(h: number) {
 // while a row is open, its history follows the list's refreshes
 watch(relays, () => { if (expanded.value !== null && loading.value === null) loadSamples(expanded.value) })
 
-// ── the charts, drawn as inline SVG (the panel carries no chart library) ─────
-const CH = { w: 600, h: 88, pad: 6 }
-/** a reading that never connected has no round trip: the line breaks there instead of dipping to 0 */
-function lineOf(rows: RelaySample[], pick: (s: RelaySample) => number | null) {
-  const vals = rows.map(pick)
-  const known = vals.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
-  const max = known.length ? Math.max(...known) : 0
-  const span = max || 1
-  const step = rows.length > 1 ? (CH.w - CH.pad * 2) / (rows.length - 1) : 0
-  const segments: string[] = []
-  let run: string[] = []
-  vals.forEach((v, i) => {
-    if (v === null || !Number.isFinite(v)) { if (run.length) segments.push(run.join(' ')); run = []; return }
-    run.push(`${(CH.pad + i * step).toFixed(1)},${(CH.h - CH.pad - (v / span) * (CH.h - CH.pad * 2)).toFixed(1)}`)
-  })
-  if (run.length) segments.push(run.join(' '))
-  return { segments, max }
-}
-function barsOf(rows: RelaySample[]) {
-  const max = Math.max(1, ...rows.map((s) => s.bytes || 0))
-  const bw = rows.length ? (CH.w - CH.pad * 2) / rows.length : 0
-  return rows.map((s, i) => {
-    const h = ((s.bytes || 0) / max) * (CH.h - CH.pad * 2)
-    return { x: CH.pad + i * bw, w: Math.max(1, bw - 1), y: CH.h - CH.pad - h, h, title: `${localTime(s.at)} · ${formatBytes(s.bytes || 0)}` }
-  })
+// ── the charts: one time axis, a panel per measure (TimeSeries) ──────────────
+function panelsOf(rows: RelaySample[]): Panel[] {
+  return [
+    { title: '延迟 / 抖动', format: (v) => ms(v), tick: (v) => `${v} ms`, ticks: (m) => niceTicks(m, 2),
+      series: [{ label: '延迟', cls: 's-rtt', values: rows.map((s) => s.rtt_ms) },
+        { label: '抖动', cls: 's-jitter', values: rows.map((s) => s.jitter_ms) }] },
+    { title: '丢包', area: true, format: (v) => `${+v.toFixed(1)}%`, tick: (v) => `${v}%`, ticks: (m) => niceTicks(Math.max(m, 1), 2),
+      series: [{ label: '丢包', cls: 's-loss', values: rows.map((s) => s.loss_pct ?? 0) }] },
+    { title: '流量', area: true, format: formatBytes, tick: byteTick, ticks: (m) => byteTicks(m, 2),
+      series: [{ label: '流量', cls: 's-traffic', values: rows.map((s) => s.bytes || 0) }] },
+  ]
 }
 const rowsOf = (id: number) => samples.value[id] ?? []
 const avg = (rows: RelaySample[], pick: (s: RelaySample) => number | null) => {
@@ -258,26 +246,7 @@ const statusText = (s: string) => NODE_STATUS[s] ?? s
                         <span>最高丢包 <b>{{ worstLoss(rowsOf(r.id)) }}%</b></span>
                         <span>这段时间流量 <b>{{ formatBytes(totalBytes(rowsOf(r.id))) }}</b></span>
                       </div>
-                      <div class="chart">
-                        <div class="chart-title">延迟 / 抖动（峰值 {{ ms(lineOf(rowsOf(r.id), (s) => s.rtt_ms).max) }}）</div>
-                        <svg :viewBox="`0 0 ${CH.w} ${CH.h}`" preserveAspectRatio="none" class="chart-svg">
-                          <polyline v-for="(seg, i) in lineOf(rowsOf(r.id), (s) => s.rtt_ms).segments" :key="`r${i}`" :points="seg" class="line rtt" />
-                          <polyline v-for="(seg, i) in lineOf(rowsOf(r.id), (s) => s.jitter_ms).segments" :key="`j${i}`" :points="seg" class="line jitter" />
-                        </svg>
-                        <div class="chart-legend"><span class="key rtt" />延迟<span class="key jitter" />抖动</div>
-                      </div>
-                      <div class="chart">
-                        <div class="chart-title">丢包（峰值 {{ lineOf(rowsOf(r.id), (s) => s.loss_pct).max }}%）</div>
-                        <svg :viewBox="`0 0 ${CH.w} ${CH.h}`" preserveAspectRatio="none" class="chart-svg">
-                          <polyline v-for="(seg, i) in lineOf(rowsOf(r.id), (s) => s.loss_pct).segments" :key="`l${i}`" :points="seg" class="line loss" />
-                        </svg>
-                      </div>
-                      <div class="chart">
-                        <div class="chart-title">流量</div>
-                        <svg :viewBox="`0 0 ${CH.w} ${CH.h}`" preserveAspectRatio="none" class="chart-svg">
-                          <rect v-for="(b, i) in barsOf(rowsOf(r.id))" :key="`b${i}`" :x="b.x" :y="b.y" :width="b.w" :height="b.h" class="bar"><title>{{ b.title }}</title></rect>
-                        </svg>
-                      </div>
+                      <TimeSeries :times="rowsOf(r.id).map((s) => s.at)" :panels="panelsOf(rowsOf(r.id))" :test="`chart-${r.name}`" />
                     </template>
                   </div>
                   <div>
@@ -340,24 +309,14 @@ const statusText = (s: string) => NODE_STATUS[s] ?? s
 tbody tr.relay-detail:hover > td { background: var(--surface-2) }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px }
 @media (max-width: 1000px) { .detail-grid { grid-template-columns: minmax(0, 1fr) } }
+/* where the list scrolls sideways (a narrow screen), an open row's charts and
+   settings stay in view, as wide as the part of the list that shows */
+.detail-grid { position: sticky; left: 16px; max-width: calc(min(100vw - var(--sidebar), 1480px) - 98px) }
+@media (max-width: 900px) { .detail-grid { max-width: calc(100vw - 62px) } }
 .chart-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px }
 .chart-head .grow { flex: 1 }
 .chart-stats { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 10px; font-size: 12.5px }
 .chart-stats b { font-variant-numeric: tabular-nums }
-.chart { margin-bottom: 12px }
-.chart-title { font-size: 12px; color: var(--muted); margin-bottom: 2px }
-/* the viewBox is stretched to the card's width; the height stays readable */
-.chart-svg { width: 100%; height: 88px; display: block; background: var(--surface); border: 1px solid var(--border); border-radius: 6px }
-/* a polyline is filled black by default: these lines are what make it a chart */
-.line { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke }
-.line.rtt { stroke: var(--chart-1) }
-.line.jitter { stroke: var(--chart-2) }
-.line.loss { stroke: var(--chart-3) }
-.bar { fill: var(--chart-bar); opacity: .75 }
-.chart-legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-top: 2px }
-.key { display: inline-block; width: 10px; height: 2px }
-.key.rtt { background: var(--chart-1) }
-.key.jitter { background: var(--chart-2); margin-left: 10px }
 table.mini { margin-top: 6px; border: 1px solid var(--border); border-radius: 8px; border-collapse: separate; overflow: hidden }
 table.mini td { padding: 6px 10px; background: var(--surface) }
 </style>
