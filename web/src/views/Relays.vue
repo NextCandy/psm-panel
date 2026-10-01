@@ -4,9 +4,10 @@
 // charts, its landing hosts' health and its settings.
 import { computed, onMounted, ref, watch } from 'vue'
 import { RELAY_STRATEGY_LABELS, RELAY_TRANSPORT_LABELS } from '@shared/relays'
-import { ago, api, errorText, formatBytes, GB, localTime, NODE_STATUS, parseTime, type Relay, type RelaySample, type Server } from '../api'
+import { ago, api, errorText, formatBytes, GB, localTime, NODE_STATUS, parseTime, type PanelNode, type Relay, type RelaySample, type Server } from '../api'
 import { confirmAction, toast, usePoll } from '../ui'
 import RelayDialog from '../components/RelayDialog.vue'
+import RelayLink from '../components/RelayLink.vue'
 import RowMenu from '../components/RowMenu.vue'
 import TimeSeries from '../components/TimeSeries.vue'
 import Icon from '../components/Icon.vue'
@@ -14,12 +15,15 @@ import { byteTick, byteTicks, niceTicks, type Panel } from '../chart'
 
 const relays = ref<Relay[]>([])
 const servers = ref<Server[]>([])
+const nodes = ref<PanelNode[]>([])
 const loaded = ref(false)
 const dialog = ref<null | { relay: Relay | null; batch: boolean }>(null)
+const linkOf = ref<Relay | null>(null)
 
 async function load() {
   try {
-    ;[relays.value, servers.value] = await Promise.all([api<Relay[]>('/api/relays'), api<Server[]>('/api/servers')])
+    ;[relays.value, servers.value, nodes.value] = await Promise.all([
+      api<Relay[]>('/api/relays'), api<Server[]>('/api/servers'), api<PanelNode[]>('/api/nodes')])
   } catch (e) {
     toast(errorText(e), 'err')
   } finally {
@@ -31,6 +35,7 @@ const moving = (r: Relay) => ['queued', 'deleting', 'pending'].includes(r.status
 usePoll(load, 30000, () => relays.value.some(moving))
 
 const serverName = (id: number | null) => (id === null ? '' : servers.value.find((s) => s.id === id)?.name ?? '?')
+const nodeOf = (r: Relay) => (r.node_id === null ? undefined : nodes.value.find((n) => n.id === r.node_id))
 
 // ── search and filters ───────────────────────────────────────────────────────
 const q = ref('')
@@ -198,9 +203,13 @@ const statusText = (s: string) => NODE_STATUS[s] ?? s
                 </template>
                 <template v-else>
                   <span class="mono">{{ r.targets[0]?.host }}:{{ r.targets[0]?.port }}</span>
-                  <span v-if="r.targets[0]?.server_id" class="label-chip" style="margin-left: 4px">{{ serverName(r.targets[0].server_id) }}</span>
+                  <span v-if="r.targets[0]?.server_id && !nodeOf(r)" class="label-chip" style="margin-left: 4px">{{ serverName(r.targets[0].server_id) }}</span>
                   <span v-if="r.targets.length > 1" class="sub">共 {{ r.targets.length }} 个 · {{ RELAY_STRATEGY_LABELS[r.strategy] }}</span>
                 </template>
+                <span v-if="nodeOf(r)" class="sub" :data-test="`parent-${r.name}`">
+                  节点 <b>{{ serverName(nodeOf(r)!.server_id) }}/{{ nodeOf(r)!.name }}</b>
+                  <span v-if="r.in_sub" class="badge info" title="这个节点经这条中转也进订阅">进订阅</span>
+                </span>
               </td>
               <td :title="r.last_sample_at ? `测于 ${localTime(r.last_sample_at)}` : '还没有测量数据'">
                 <span class="rtt" :class="rttClass(r.last_rtt_ms)">{{ ms(r.last_rtt_ms) }}</span>
@@ -222,6 +231,10 @@ const statusText = (s: string) => NODE_STATUS[s] ?? s
                 <span class="row-actions">
                   <button class="btn small ghost" :disabled="moving(r)" :data-test="`edit-${r.name}`" @click="dialog = { relay: r, batch: false }"><Icon name="edit" />编辑</button>
                   <RowMenu :test="`more-${r.name}`">
+                    <template v-if="r.node_id !== null">
+                      <button type="button" :data-test="`relay-link-${r.name}`" @click="linkOf = r"><Icon name="link" />经中转的链接</button>
+                      <hr>
+                    </template>
                     <button type="button" class="danger" :data-test="`delete-${r.name}`" @click="remove(r)">
                       <Icon name="trash" />{{ r.status === 'deleting' || r.exit_status === 'deleting' ? '强制移除' : '删除' }}
                     </button>
@@ -274,6 +287,10 @@ const statusText = (s: string) => NODE_STATUS[s] ?? s
                       <template v-else-if="r.tls">
                         <dt>TLS</dt><dd>{{ r.tls_sni }}<template v-if="r.tls_insecure"> · 接受自签名</template></dd>
                       </template>
+                      <template v-if="nodeOf(r)">
+                        <dt>节点</dt><dd>{{ serverName(nodeOf(r)!.server_id) }}/{{ nodeOf(r)!.name }}{{ r.in_sub ? ' · 进订阅' : ' · 不进订阅' }}</dd>
+                        <dt>入口地址</dt><dd class="mono">{{ r.entry_host || servers.find((s) => s.id === r.server_id)?.last_ip || '—' }}<span v-if="!r.entry_host" class="faint">（自动）</span></dd>
+                      </template>
                       <dt>分配</dt><dd>{{ r.targets.length > 1 ? RELAY_STRATEGY_LABELS[r.strategy] : '单个落地' }}<template v-if="r.targets.length > 1 && r.engine === 'gost'"> · 健康检查{{ r.probe ? '开' : '关' }}</template></dd>
                       <dt>限额</dt><dd>{{ r.limit_gb ? `${r.limit_gb} GB / 月，${r.reset_day ? `每月 ${r.reset_day} 日重置` : '不重置'}` : '不限' }}</dd>
                       <dt>到期</dt><dd>{{ r.expires_at ? localTime(r.expires_at) : '不过期' }}</dd>
@@ -297,7 +314,8 @@ const statusText = (s: string) => NODE_STATUS[s] ?? s
       <div v-else-if="!shown.length" class="empty">没有符合条件的中转。</div>
     </div>
   </div>
-  <RelayDialog v-if="dialog" :servers="servers" :relay="dialog.relay" :batch="dialog.batch" @close="dialog = null; load()" @created="load" />
+  <RelayDialog v-if="dialog" :servers="servers" :nodes="nodes" :relay="dialog.relay" :batch="dialog.batch" @close="dialog = null; load()" @created="load" />
+  <RelayLink v-if="linkOf" :relay="linkOf" :entry="serverName(linkOf.server_id)" @close="linkOf = null" />
 </template>
 
 <style scoped>

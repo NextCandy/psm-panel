@@ -78,6 +78,10 @@ export type Relay = {
   last_sample_at: string | null; traffic_bytes: number
   exit_rtt_ms: number | null; exit_loss_pct: number | null
   target_health: TargetHealth[] | null
+  /** the node of the panel it lands on (its parent), published through it when in_sub */
+  node_id: number | null; in_sub: boolean
+  /** the address clients reach the entry at; '' is the entry server's last_ip */
+  entry_host: string
 }
 
 /** One point of a relay's chart; `bytes` is that interval's traffic. */

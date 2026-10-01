@@ -6,18 +6,24 @@
 // forwards to the landing side. The name, the servers and the mode stay once
 // made (psm keys a rule by its name). What is typed is checked as the Worker
 // will check it (shared/relays.ts).
+// The landing side may be a node of the panel (its parent): the relay then
+// forwards to the node's address and port, and the node can be published
+// through the relay — in the subscriptions, with the entry's address.
 import { computed, reactive, ref, watch } from 'vue'
 import {
-  parseHostPort, RELAY_MAX_TARGETS, RELAY_PORTS, RELAY_STRATEGY_LABELS, RELAY_TRANSPORT_LABELS,
+  bareHost, goodHost, parseHostPort, RELAY_MAX_TARGETS, RELAY_PORTS, RELAY_STRATEGY_LABELS, RELAY_TRANSPORT_LABELS,
   REALM_STRATEGIES, relayProblems, type RelayEngine, type RelayFields, type RelayMode,
 } from '@shared/relays'
-import { api, errorText, type Relay, type Server } from '../api'
+import { PROTOCOLS } from '@shared/protocols'
+import { api, errorText, type PanelNode, type Relay, type Server } from '../api'
 import { toast } from '../ui'
 import InstallCommand from './InstallCommand.vue'
 import Modal from './Modal.vue'
 import Icon from './Icon.vue'
 
-const props = defineProps<{ servers: Server[]; relay?: Relay | null; batch?: boolean }>()
+const props = defineProps<{ servers: Server[]; nodes?: PanelNode[]; relay?: Relay | null; batch?: boolean
+  /** a new relay landing on this node (节点 → 经中转发布) */
+  node?: PanelNode | null }>()
 const emit = defineEmits<{ close: []; created: [] }>()
 const editing = computed(() => !!props.relay)
 const r = props.relay
@@ -32,8 +38,10 @@ function toLocalInput(iso: string | null): string {
 }
 type TargetRow = { host: string; port: string | number; server_id: number | '' }
 const joinable = props.servers.filter((s) => s.status !== 'leaving')
+// a node's relay starts from another server: a forward cannot land where it listens
+const firstEntry = props.node ? (joinable.find((s) => s.id !== props.node!.server_id) ?? joinable[0]) : joinable[0]
 const form = reactive({
-  server: (r?.server_id ?? joinable[0]?.id ?? '') as number | '',
+  server: (r?.server_id ?? firstEntry?.id ?? '') as number | '',
   name: r?.name ?? '',
   mode: (r?.mode ?? 'forward') as RelayMode,
   engine: (r?.engine ?? 'realm') as RelayEngine,
@@ -56,6 +64,10 @@ const form = reactive({
   resetDay: (r?.reset_day ?? 1) as string | number,
   expires: toLocalInput(r?.expires_at ?? null),
   lines: '',
+  landing: (r ? (r.node_id ? 'node' : 'address') : props.node ? 'node' : 'address') as 'node' | 'address',
+  nodeId: (r?.node_id ?? props.node?.id ?? '') as number | '',
+  entryHost: r?.entry_host ?? '',
+  inSub: r?.in_sub ?? true,
 })
 const serverOf = (id: number | '') => props.servers.find((s) => s.id === id)
 const entry = computed(() => serverOf(form.server))
@@ -77,6 +89,28 @@ watch(() => form.exitServer, (id) => {
   if (s?.last_ip && (!form.exitHost || props.servers.some((x) => x.last_ip === form.exitHost))) form.exitHost = s.last_ip
 })
 const exitChoices = computed(() => props.servers.filter((s) => s.id !== form.server && s.status !== 'leaving'))
+
+// ── a node of the panel as the landing side ──────────────────────────────────
+const byNode = computed(() => form.landing === 'node' && !props.batch)
+const landingNode = computed(() => (byNode.value ? props.nodes?.find((n) => n.id === form.nodeId) : undefined))
+const nodeGroups = computed(() => props.servers
+  .map((s) => ({ server: s.name, nodes: (props.nodes ?? []).filter((n) => n.server_id === s.id) }))
+  .filter((g) => g.nodes.length))
+const protoLabel = (n: PanelNode) => PROTOCOLS.find((p) => p.id === n.protocol)?.label ?? n.protocol
+// QUIC and WireGuard nodes speak UDP alone (the Worker also knows Xray's mKCP)
+const nodeUdp = computed(() => !!landingNode.value && ['hysteria2', 'tuic', 'wireguard'].includes(landingNode.value.protocol))
+watch(nodeUdp, (v) => { if (v) form.udp = true }, { immediate: true })
+// named after the node (as the subscription will show it: entry-name), until a name is typed
+const autoName = (n?: PanelNode) => (n ? `${serverOf(n.server_id)?.name ?? 'node'}-${n.name}` : '')
+  .replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 48)
+let lastAuto = ''
+watch(landingNode, (n) => {
+  if (editing.value || (form.name && form.name !== lastAuto)) return
+  form.name = lastAuto = autoName(n)
+}, { immediate: true })
+// what clients may reach the entry at: where its agent syncs from, its nodes' addresses
+const entryHosts = computed(() => [...new Set([entry.value?.last_ip ?? '',
+  ...(props.nodes ?? []).filter((n) => n.server_id === form.server).map((n) => n.address)].filter(Boolean))])
 function addTarget() {
   if (form.targets.length < RELAY_MAX_TARGETS) form.targets.push({ host: '', port: form.targets[0]?.port ?? '', server_id: '' })
 }
@@ -93,9 +127,11 @@ const num = (v: string | number) => (v === '' || v === null ? null : Number(v))
 const fields = computed<RelayFields>(() => ({
   name: props.batch ? 'batch' : form.name.trim(), mode: form.mode, engine: form.engine,
   listen_port: props.batch ? null : num(form.listenPort),
-  targets: props.batch ? [{ host: 'example.com', port: 1 }] : form.targets.map((t) => ({ host: t.host.trim().replace(/^\[(.*)\]$/, '$1'), port: Number(t.port) })),
-  strategy: form.strategy,
-  tls: form.mode === 'forward' && form.engine === 'realm' && form.tls,
+  targets: props.batch ? [{ host: 'example.com', port: 1 }]
+    : byNode.value ? (landingNode.value ? [{ host: landingNode.value.address, port: landingNode.value.public_port ?? landingNode.value.port }] : [{ host: 'example.com', port: 1 }])
+    : form.targets.map((t) => ({ host: t.host.trim().replace(/^\[(.*)\]$/, '$1'), port: Number(t.port) })),
+  strategy: byNode.value ? '' : form.strategy,
+  tls: form.mode === 'forward' && form.engine === 'realm' && form.tls && !byNode.value,
   tls_sni: form.tlsSni.trim(),
   exit_host: form.exitHost.trim().replace(/^\[(.*)\]$/, '$1'), exit_port: num(form.exitPort),
   transport: form.transport, ws_host: form.wsHost.trim(), ws_path: form.wsPath.trim(),
@@ -108,13 +144,19 @@ const problems = computed(() => {
   if (!form.server) p.unshift('选择入口服务器')
   if (form.mode === 'tunnel' && !form.exitServer) p.push('选择出口服务器')
   if (props.batch && !form.lines.trim()) p.push('每行一条：名称 端口(或 auto) 落地地址:端口[,落地地址:端口…]')
+  if (byNode.value) {
+    if (!landingNode.value) p.push('选择落地节点')
+    else if (form.mode === 'forward' && landingNode.value.server_id === form.server) p.push('入口和落地不能是同一台服务器')
+    const h = bareHost(form.entryHost)
+    if (h && !goodHost(h)) p.push('入口地址：客户端连入口服务器用的域名或 IP')
+  }
   return p
 })
 const serverErrors = ref<string[]>([])
 const shownErrors = computed(() => (serverErrors.value.length ? serverErrors.value : tried.value ? problems.value : []))
 watch(() => JSON.stringify(form), () => { serverErrors.value = [] })
 
-const multi = computed(() => props.batch || form.targets.length > 1)
+const multi = computed(() => props.batch || (!byNode.value && form.targets.length > 1))
 const range = computed(() => entry.value?.relay_port_min
   ? `${entry.value.relay_port_min}-${entry.value.relay_port_max}` : `${RELAY_PORTS[0]}-${RELAY_PORTS[1]}`)
 const batchRows = computed(() => form.lines.split('\n').map((l) => l.replace(/#.*/, '').trim()).filter(Boolean).length)
@@ -133,7 +175,9 @@ function body() {
   if (props.batch) return { ...common, server_id: form.server, lines: form.lines }
   return {
     ...common, server_id: form.server, name: f.name, listen_port: f.listen_port,
-    targets: form.targets.map((t, i) => ({ host: f.targets[i].host, port: f.targets[i].port, server_id: t.server_id === '' ? null : t.server_id })),
+    ...(byNode.value
+      ? { node_id: form.nodeId, entry_host: bareHost(form.entryHost), in_sub: form.inSub }
+      : { node_id: null, targets: form.targets.map((t, i) => ({ host: f.targets[i].host, port: f.targets[i].port, server_id: t.server_id === '' ? null : t.server_id })) }),
     ...(form.mode === 'tunnel' ? { exit_port: f.exit_port } : {}),
   }
 }
@@ -173,7 +217,8 @@ const title = computed(() => result.value ? (props.batch ? '批量添加完成' 
   : editing.value ? `编辑中转 ${r!.name}` : props.batch ? '批量添加中转' : '新建中转')
 const subtitle = computed(() => result.value ? '' : editing.value
   ? '修改由 psm-agent 在服务器上生效；名称、服务器和转发方式不能改。'
-  : props.batch ? '同样的设置，每行一条中转；全部检查通过才会创建。' : '入口服务器监听一个端口，把客户端送到落地。')
+  : props.batch ? '同样的设置，每行一条中转；全部检查通过才会创建。'
+  : props.node ? `节点 ${props.node.name} 经另一台服务器转发：设置不变，客户端改连入口。` : '入口服务器监听一个端口，把客户端送到落地。')
 </script>
 
 <template>
@@ -192,6 +237,7 @@ const subtitle = computed(() => result.value ? '' : editing.value
           隧道先在出口 {{ serverOf(form.exitServer)?.name }} 上建好，拿到它的证书后再在入口 {{ entry?.name }} 上建，入口会钉住这张证书。
         </div>
         <div v-else class="notice warn" data-test="result-waiting">中转已保存，等服务器接入面板后自动生效。</div>
+        <p v-if="byNode && form.inSub" class="help" data-test="result-sub">中转运行后，订阅里会多出「{{ entry?.name }}-{{ form.name }}」（跟着节点 {{ landingNode?.name }} 的标签）。</p>
       </template>
       <div v-for="i in result.install" :key="i.server" class="field">
         <span class="field-label">在 {{ i.server }} 上以 root 执行（安装 PSM 并接入面板）：</span>
@@ -287,7 +333,26 @@ const subtitle = computed(() => result.value ? '' : editing.value
 
       <!-- the landing side -->
       <div class="section-title">落地 <span class="muted">{{ form.mode === 'tunnel' ? '出口' : '入口' }}把流量送到这里</span></div>
-      <div v-if="batch" class="field">
+      <div v-if="!batch" class="field">
+        <div class="segmented" role="radiogroup" aria-label="落地">
+          <button type="button" :class="{ on: form.landing === 'node' }" :aria-checked="form.landing === 'node'" role="radio"
+                  :disabled="!nodes?.length" data-test="landing-node" @click="form.landing = 'node'">面板节点</button>
+          <button type="button" :class="{ on: form.landing === 'address' }" :aria-checked="form.landing === 'address'" role="radio"
+                  data-test="landing-address" @click="form.landing = 'address'">其他地址</button>
+        </div>
+      </div>
+      <div v-if="byNode" class="field">
+        <select v-model="form.nodeId" class="select" data-test="landing-node-select" aria-label="落地节点">
+          <option value="" disabled>选择节点</option>
+          <optgroup v-for="g in nodeGroups" :key="g.server" :label="g.server">
+            <option v-for="n in g.nodes" :key="n.id" :value="n.id" :disabled="n.status === 'deleting'">
+              {{ n.name }} · {{ protoLabel(n) }} · {{ n.address }}:{{ n.public_port ?? n.port }}
+            </option>
+          </optgroup>
+        </select>
+        <div class="help">转发到节点的地址和端口，节点改了会跟着改。节点的设置不变，客户端只是改连入口。</div>
+      </div>
+      <div v-else-if="batch" class="field">
         <label>中转列表</label>
         <textarea v-model="form.lines" class="input mono" rows="7" spellcheck="false" data-test="batch-lines"
           placeholder="# 名称 端口(或 auto) 落地地址:端口[,落地地址:端口…]&#10;hk-jp 20001 203.0.113.9:443&#10;hk-us auto 198.51.100.7:8443,198.51.100.8:8443" />
@@ -333,11 +398,25 @@ const subtitle = computed(() => result.value ? '' : editing.value
         </div>
         <div class="field">
           <span class="field-label">协议</span>
-          <label class="check"><input v-model="form.udp" type="checkbox" data-test="udp"> 同时转发 UDP</label>
-          <div class="help">Hysteria2、TUIC 这类基于 QUIC 的协议必须开{{ form.mode === 'tunnel' ? '；UDP 在隧道里传' : '' }}。</div>
+          <label class="check"><input v-model="form.udp" type="checkbox" :disabled="nodeUdp" data-test="udp"> 同时转发 UDP</label>
+          <div class="help">{{ nodeUdp ? `${protoLabel(landingNode!)} 只走 UDP，必须转发` : 'Hysteria2、TUIC 这类基于 QUIC 的协议必须开' }}{{ form.mode === 'tunnel' ? '；UDP 在隧道里传' : '' }}。</div>
         </div>
       </div>
-      <template v-if="form.mode === 'forward' && form.engine === 'realm'">
+      <div v-if="byNode" class="row2">
+        <div class="field">
+          <label>入口地址</label>
+          <input v-model="form.entryHost" class="input" list="relay-entry-hosts" data-test="entry-host"
+                 :placeholder="entry?.last_ip ? `留空用 ${entry.last_ip}` : '客户端连入口服务器用的域名或 IP'">
+          <datalist id="relay-entry-hosts"><option v-for="h in entryHosts" :key="h" :value="h" /></datalist>
+          <div class="help">订阅和链接里客户端连的地址；留空用入口服务器最近连面板的地址。</div>
+        </div>
+        <div class="field">
+          <span class="field-label">订阅</span>
+          <label class="check"><input v-model="form.inSub" type="checkbox" data-test="in-sub"> 加入订阅</label>
+          <div class="help">订阅里多出「{{ entry?.name ?? '入口' }}-{{ form.name || '名称' }}」：节点的设置，入口的地址和端口；跟着节点的标签进订阅。</div>
+        </div>
+      </div>
+      <template v-if="form.mode === 'forward' && form.engine === 'realm' && !byNode">
         <div class="field">
           <label class="check"><input v-model="form.tls" type="checkbox" data-test="tls"> 对入口到落地这一跳加密（realm TLS，只包 TCP）</label>
           <div class="help">落地那台也要有 realm 解开它。要完整加密（含 UDP），用隧道。</div>

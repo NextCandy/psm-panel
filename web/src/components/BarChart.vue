@@ -96,9 +96,13 @@ const total = computed(() => bars.value.reduce((a, b) => a + b.bytes, 0))
         <div v-if="tip.b.before" class="faint">上个月，不计入本月</div>
       </div>
     </div>
-    <table class="sr-only">
-      <caption>每天的流量（UTC 日期）</caption>
-      <tbody><tr v-for="b in bars" :key="b.day"><th scope="row">{{ b.day }}</th><td>{{ formatBytes(b.bytes) }}</td></tr></tbody>
-    </table>
+    <!-- for screen readers; in a div: a table keeps its rows' height whatever
+         it is given, and on its own it stretched the page by that much -->
+    <div class="sr-only">
+      <table>
+        <caption>每天的流量（UTC 日期）</caption>
+        <tbody><tr v-for="b in bars" :key="b.day"><th scope="row">{{ b.day }}</th><td>{{ formatBytes(b.bytes) }}</td></tr></tbody>
+      </table>
+    </div>
   </div>
 </template>

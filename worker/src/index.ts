@@ -9,18 +9,19 @@ import {
   adminConfigured, clearFailures, clearedCookie, ipKey, passwordIgnored, passwordMatches, recordFailure, revokeSessions,
   sessionCookie, syncAdminPassword, tooManyFailures, validSession,
 } from './auth'
-import { buildSubscription, pickFormat, type SubNode } from './subscription'
+import { buildSubscription, pickFormat, renameLink, type SubNode } from './subscription'
 import { BUILTIN_TEMPLATES, FORMAT_LABELS, TEMPLATE_FORMATS, type TemplateFormat } from './templates'
 import { activeFields, findVariant, trafficTag, validateNode, type NodeInput } from '../../shared/protocols'
 import {
-  bareHost, goodPort, parseHostPort, RELAY_PORTS, relayProblems, type RelayEngine, type RelayFields, type RelayMode,
+  bareHost, goodHost, goodPort, parseHostPort, RELAY_PORTS, relayProblems, type RelayEngine, type RelayFields, type RelayMode,
 } from '../../shared/relays'
 import { findSniCandidates, SNI_ENGINES } from './sni'
+import { linkVia, nodeVia, type Via } from './relayed'
 
 // not exported: every export of a Worker's main module is taken for an entrypoint
 // Shown in 系统设置 as 面板版本; bump it whenever the panel gains something, so
 // that it answers "did my deploy take effect?" — the only marker a user has.
-const PANEL_VERSION = '0.9.0'
+const PANEL_VERSION = '0.10.0'
 
 // The psm-agent release this panel expects its servers to run: the 服务器 page
 // offers an upgrade to every joined server reporting anything else. Bump it
@@ -74,6 +75,7 @@ type RelayRow = {
   exit_rtt_ms: number | null; exit_loss_pct: number | null
   speed_mbps: number; limit_gb: number; reset_day: number; expires_at: string | null
   quota_used: number | null; paused: string; target_health: string | null
+  node_id: number | null; entry_host: string; in_sub: number
 }
 type TaskRow = { id: number; server_id: number; node_id: number | null; relay_id: number | null; kind: string; payload_enc: string; status: string }
 type AgentResult = { task_id: number; ok: boolean; link?: string; outbound?: unknown; clash?: unknown; error?: string; output?: unknown }
@@ -660,6 +662,8 @@ app.patch('/api/nodes/:id', async (c) => {
   const updated = (await getNode(c.env, n.id))!
   if (status === 'queued') await queueApply(c.env, updated, v.data, onServer ? 'update' : 'add')
   await audit(c.env, 'node.update', `${server.name}/${n.name}`)
+  // the relays landing on it go where its clients now go
+  if (nodeTarget(updated).host !== nodeTarget(n).host || nodeTarget(updated).port !== nodeTarget(n).port) await retargetNodeRelays(c.env, updated)
   return c.json(await publicNode(c.env, updated))
 })
 
@@ -771,6 +775,8 @@ type RelayInput = {
   exit_server_id?: number; exit_host?: string; exit_port?: number | null
   transport?: string; ws_host?: string; ws_path?: string
   speed_mbps?: number; limit_gb?: number; reset_day?: number; expires_at?: string | null
+  // landing on a node of the panel (null: no longer), published through the relay
+  node_id?: number | null; entry_host?: string; in_sub?: boolean
 }
 /** A relay as it is to be: checked, complete, before it touches D1. */
 type RelayPlan = {
@@ -781,6 +787,7 @@ type RelayPlan = {
   exit: ServerRow | null; exit_host: string; exit_port: number | null
   transport: string; ws_host: string; ws_path: string
   speed_mbps: number; limit_gb: number; reset_day: number; expires_at: string | null
+  node: NodeRow | null; entry_host: string; in_sub: boolean
 }
 
 async function getRelay(env: Env, id: unknown): Promise<RelayRow | null> {
@@ -803,7 +810,7 @@ const publicRelay = (r: RelayRow) => {
   try { health = r.target_health ? JSON.parse(r.target_health) : null } catch { /* none */ }
   return { ...rest, udp: !!r.udp, tls: !!r.tls, tls_insecure: !!r.tls_insecure, probe: !!r.probe,
     auto_port: !!r.auto_port, exit_auto_port: !!r.exit_auto_port, targets: relayTargets(r), target_health: health,
-    exit_pinned: !!cert }
+    exit_pinned: !!cert, in_sub: !!r.in_sub }
 }
 
 /** "1.2.3" at least "1.2.0"? An unknown version is not. */
@@ -829,9 +836,15 @@ async function planRelay(env: Env, b: RelayInput, old?: RelayRow): Promise<{ pla
   // a tunnel is gost's; saying otherwise is reported, not ignored
   const engine = String(mode === 'tunnel' ? (b.engine ?? 'gost') : (b.engine ?? old?.engine ?? 'realm')) as RelayEngine
 
+  // a node of the panel as the landing side: its address and port, not the ones typed
+  const nodeId = b.node_id === undefined ? (old?.node_id ?? null) : b.node_id
+  const node = nodeId === null ? null : await getNode(env, nodeId)
+  if (nodeId !== null && !node) return { errors: ['落地节点不存在'] }
+
   // the landing hosts: a list, or the one host relays had before there were lists
   let raw: { host?: unknown; port?: unknown; server_id?: unknown }[] | null = null
-  if (Array.isArray(b.targets)) raw = b.targets
+  if (node) raw = [nodeTarget(node)]
+  else if (Array.isArray(b.targets)) raw = b.targets
   else if (b.remote_host !== undefined || b.remote_port !== undefined || b.remote_server_id !== undefined) {
     const first = old ? relayTargets(old)[0] : undefined
     raw = [{ host: b.remote_host ?? first?.host, port: b.remote_port ?? first?.port,
@@ -857,7 +870,8 @@ async function planRelay(env: Env, b: RelayInput, old?: RelayRow): Promise<{ pla
     mode, engine,
     listen_port: b.listen_port === undefined ? (old ? old.listen_port : null) : b.listen_port,
     targets,
-    strategy: String(b.strategy ?? old?.strategy ?? ''),
+    // one landing host when it is a node: nothing to share out
+    strategy: node ? '' : String(b.strategy ?? old?.strategy ?? ''),
     // realm's own TLS hop, asked for (or kept, while it is still a realm forward)
     tls: b.tls ?? (mode === 'forward' && engine === 'realm' ? !!old?.tls : false),
     tls_sni: String(b.tls_sni ?? old?.tls_sni ?? '').trim(),
@@ -872,6 +886,10 @@ async function planRelay(env: Env, b: RelayInput, old?: RelayRow): Promise<{ pla
     expires_at,
   }
   errors.push(...relayProblems(f))
+  // realm's TLS needs a realm on the far side to take it off; a node is not one
+  if (node && f.tls) errors.push('落地是面板节点时不能用 realm TLS（节点不认这一层）；要加密这一跳，用隧道')
+  const entry_host = bareHost(b.entry_host ?? old?.entry_host ?? '')
+  if (entry_host && !goodHost(entry_host)) errors.push('入口地址：客户端连入口服务器用的域名或 IP')
 
   // the tunnel's exit server
   let exit: ServerRow | null = null
@@ -885,13 +903,26 @@ async function planRelay(env: Env, b: RelayInput, old?: RelayRow): Promise<{ pla
   // one form everywhere after this: UTC, to the second
   if (expires_at) expires_at = new Date(Date.parse(expires_at)).toISOString().replace(/\.\d{3}Z$/, 'Z')
   const probe = b.probe ?? (old ? !!old.probe : true)
-  const udp = b.udp ?? (old ? !!old.udp : false)
+  // a node that speaks UDP alone (QUIC, mKCP, WireGuard) is unreachable without it
+  const udp = (node && await nodeOverUdp(env, node)) || (b.udp ?? (old ? !!old.udp : false))
   return { errors, plan: {
     server, name: f.name, mode, engine, listen_port: f.listen_port, targets, strategy: f.strategy, probe, udp,
     tls: f.tls, tls_sni: f.tls && !f.tls_sni ? targets[0].host : f.tls_sni, tls_insecure: f.tls ? (b.tls_insecure ?? !!old?.tls_insecure) : false,
     exit, exit_host: f.exit_host, exit_port: f.exit_port, transport, ws_host: f.ws_host, ws_path: f.ws_path,
     speed_mbps: f.speed_mbps, limit_gb: f.limit_gb, reset_day: f.reset_day, expires_at,
+    node, entry_host, in_sub: b.in_sub ?? (old ? !!old.in_sub : true),
   } }
+}
+
+/** Where a relay landing on this node forwards to: what its clients dial. */
+const nodeTarget = (n: NodeRow): RelayTarget => ({ host: n.address, port: n.public_port ?? n.port, server_id: n.server_id })
+
+/** The node speaks UDP alone: Hysteria2, TUIC, WireGuard, Xray's mKCP. */
+async function nodeOverUdp(env: Env, n: NodeRow): Promise<boolean> {
+  if (['hysteria2', 'tuic', 'wireguard'].includes(n.protocol)) return true
+  if (n.variant !== 'vless-xhttp') return false
+  const params = JSON.parse(await decrypt(env.TOKEN_KEY, n.params_enc)) as Record<string, unknown>
+  return params.mode === 'mkcp'
 }
 
 /** Another relay rule on this server has the name: its own relays, and the tunnels it is the exit of. */
@@ -1024,13 +1055,15 @@ async function createRelay(env: Env, b: RelayInput): Promise<{ id?: number; stat
     const r = await env.DB.prepare(
       `INSERT INTO relays (server_id, name, listen_port, remote_host, remote_port, remote_server_id, udp, tls, tls_sni, tls_insecure,
          status, engine, mode, targets, strategy, probe, auto_port, exit_server_id, exit_host, exit_port, exit_auto_port,
-         transport, ws_host, ws_path, secret_enc, exit_status, pending_entry, speed_mbps, limit_gb, reset_day, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         transport, ws_host, ws_path, secret_enc, exit_status, pending_entry, speed_mbps, limit_gb, reset_day, expires_at,
+         node_id, entry_host, in_sub)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(p.server.id, p.name, listen, p.targets[0].host, p.targets[0].port, p.targets[0].server_id,
         p.udp ? 1 : 0, p.tls ? 1 : 0, p.tls_sni, p.tls_insecure ? 1 : 0,
         status, p.engine, p.mode, JSON.stringify(p.targets), p.strategy, p.probe ? 1 : 0, auto ? 1 : 0,
         p.exit?.id ?? null, p.exit_host, exitPort, exitAuto ? 1 : 0, p.transport, p.ws_host, p.ws_path, secret,
-        exitStatus, p.mode === 'tunnel' ? 'add' : '', p.speed_mbps, p.limit_gb, p.reset_day, p.expires_at)
+        exitStatus, p.mode === 'tunnel' ? 'add' : '', p.speed_mbps, p.limit_gb, p.reset_day, p.expires_at,
+        p.node?.id ?? null, p.entry_host, p.in_sub ? 1 : 0)
       .run()
     id = Number(r.meta.last_row_id)
   } catch (e) {
@@ -1044,8 +1077,9 @@ async function createRelay(env: Env, b: RelayInput): Promise<{ id?: number; stat
     await queueRelaySide(env, row, 'forward', 'add')
   }
   const hop = p.mode === 'tunnel' ? `${listen} → ${p.exit!.name}:${exitPort} → ` : `${listen} → `
+  const landing = p.node ? `${(await getServer(env, p.node.server_id))?.name}/${p.node.name} ` : ''
   await audit(env, 'relay.add', `${p.server.name}/${p.name}`,
-    hop + p.targets.map((t) => `${t.host}:${t.port}`).join(', '))
+    hop + landing + p.targets.map((t) => `${t.host}:${t.port}`).join(', '))
   return { id, status, joined, errors: [] }
 }
 
@@ -1102,7 +1136,8 @@ app.post('/api/relays', async (c) => {
 app.post('/api/relays/batch', async (c) => {
   const body = await c.req.json<RelayInput & { lines?: string }>().catch(() => null)
   if (!body || typeof body !== 'object') return c.json(fail('bad_body', 'the body must be a JSON object'), 400)
-  const { lines: text, ...common } = body
+  // a node is one landing host: a batch is lines of landing hosts, not that
+  const { lines: text, node_id: _node, ...common } = body
   const rows = String(text ?? '').split('\n').map((l, i) => ({ no: i + 1, line: l.replace(/#.*/, '').trim() })).filter((r) => r.line)
   const errors: string[] = []
   if (!rows.length) errors.push('每行一条：名称 端口(或 auto) 落地地址:端口[,落地地址:端口…]')
@@ -1183,11 +1218,12 @@ app.patch('/api/relays/:id', async (c) => {
       `UPDATE relays SET listen_port = ?, remote_host = ?, remote_port = ?, remote_server_id = ?, udp = ?, tls = ?,
               tls_sni = ?, tls_insecure = ?, engine = ?, targets = ?, strategy = ?, probe = ?, auto_port = ?,
               exit_host = ?, exit_port = ?, exit_auto_port = ?, transport = ?, ws_host = ?, ws_path = ?,
-              speed_mbps = ?, limit_gb = ?, reset_day = ?, expires_at = ?, last_error = NULL, exit_error = NULL WHERE id = ?`)
+              speed_mbps = ?, limit_gb = ?, reset_day = ?, expires_at = ?, node_id = ?, entry_host = ?, in_sub = ?,
+              last_error = NULL, exit_error = NULL WHERE id = ?`)
       .bind(listen, p.targets[0].host, p.targets[0].port, p.targets[0].server_id, p.udp ? 1 : 0, p.tls ? 1 : 0,
         p.tls_sni, p.tls_insecure ? 1 : 0, p.engine, JSON.stringify(p.targets), p.strategy, p.probe ? 1 : 0, auto ? 1 : 0,
         p.exit_host, exitPort, exitAuto ? 1 : 0, p.transport, p.ws_host, p.ws_path,
-        p.speed_mbps, p.limit_gb, p.reset_day, p.expires_at, old.id).run()
+        p.speed_mbps, p.limit_gb, p.reset_day, p.expires_at, p.node?.id ?? null, p.entry_host, p.in_sub ? 1 : 0, old.id).run()
   } catch (e) {
     if (String(e).includes('UNIQUE')) {
       const msg = `${p.server.name} 上这个监听端口已被另一条中转占用`
@@ -1195,32 +1231,63 @@ app.patch('/api/relays/:id', async (c) => {
     }
     throw e
   }
-  let r = (await getRelay(c.env, old.id))!
-  const entryJoined = !!p.server.agent_token_hash
-  if (p.mode === 'forward') {
-    if (entryJoined && (old.status === 'applied' || old.status === 'failed')) {
-      await c.env.DB.prepare(`UPDATE relays SET status = 'queued' WHERE id = ?`).bind(r.id).run()
-      await queueRelaySide(c.env, r, 'forward', old.status === 'applied' ? 'update' : 'add')
-    }
-  } else {
-    // what the exit has to change first: its landing hosts, its port, the wire
-    const exitKey = (x: RelayRow) => JSON.stringify([relayTargets(x), x.strategy, x.probe, x.exit_port, x.transport, x.tls_sni, x.ws_path])
-    const exitChanged = exitKey(old) !== exitKey(r)
-    const exitJoined = !!p.exit?.agent_token_hash
-    const entryNext = old.status === 'applied' ? 'update' : 'add'
-    // a failed exit is sent again even unchanged: that is how it is retried
-    if ((exitChanged || old.exit_status === 'failed') && exitJoined && (old.exit_status === 'applied' || old.exit_status === 'failed')) {
-      await c.env.DB.prepare(`UPDATE relays SET exit_status = 'queued', pending_entry = ? WHERE id = ?`).bind(entryNext, r.id).run()
-      r = (await getRelay(c.env, r.id))!
-      await queueRelaySide(c.env, r, 'exit', old.exit_status === 'applied' ? 'update' : 'add')
-    } else if (old.exit_status === 'applied' && entryJoined && ['applied', 'failed', 'pending'].includes(old.status)) {
-      await c.env.DB.prepare(`UPDATE relays SET status = 'queued', pending_entry = '' WHERE id = ?`).bind(r.id).run()
-      await queueRelaySide(c.env, r, 'entry', entryNext)
-    }
-  }
+  // a change of what only the panel uses (the node it publishes, the entry
+  // address, the subscription) and nothing else is none for the servers;
+  // anything else is sent again, unchanged or not (that is how a failed one is retried)
+  const now = (await getRelay(c.env, old.id))!
+  const rest = (x: RelayRow) => JSON.stringify({ ...x, node_id: null, entry_host: '', in_sub: 0, last_error: null, exit_error: null })
+  const panelOnly = (old.node_id !== now.node_id || old.entry_host !== now.entry_host || old.in_sub !== now.in_sub) && rest(old) === rest(now)
+  if (!panelOnly) await resendRelay(c.env, old)
   await audit(c.env, 'relay.update', `${p.server.name}/${old.name}`)
   return c.json(publicRelay((await getRelay(c.env, old.id))!))
 })
+
+/** A relay's row has changed (`old` is how it was): the change goes to the side(s) on a server. */
+async function resendRelay(env: Env, old: RelayRow) {
+  let r = (await getRelay(env, old.id))!
+  const entryJoined = !!(await getServer(env, r.server_id))?.agent_token_hash
+  if (r.mode === 'forward') {
+    if (entryJoined && (old.status === 'applied' || old.status === 'failed')) {
+      await env.DB.prepare(`UPDATE relays SET status = 'queued' WHERE id = ?`).bind(r.id).run()
+      await queueRelaySide(env, r, 'forward', old.status === 'applied' ? 'update' : 'add')
+    }
+    return
+  }
+  // what the exit has to change first: its landing hosts, its port, the wire
+  const exitKey = (x: RelayRow) => JSON.stringify([relayTargets(x), x.strategy, x.probe, x.exit_port, x.transport, x.tls_sni, x.ws_path])
+  const exitChanged = exitKey(old) !== exitKey(r)
+  const exitJoined = !!(r.exit_server_id && (await getServer(env, r.exit_server_id))?.agent_token_hash)
+  const entryNext = old.status === 'applied' ? 'update' : 'add'
+  // a failed exit is sent again even unchanged: that is how it is retried
+  if ((exitChanged || old.exit_status === 'failed') && exitJoined && (old.exit_status === 'applied' || old.exit_status === 'failed')) {
+    await env.DB.prepare(`UPDATE relays SET exit_status = 'queued', pending_entry = ? WHERE id = ?`).bind(entryNext, r.id).run()
+    r = (await getRelay(env, r.id))!
+    await queueRelaySide(env, r, 'exit', old.exit_status === 'applied' ? 'update' : 'add')
+  } else if (old.exit_status === 'applied' && entryJoined && ['applied', 'failed', 'pending'].includes(old.status)) {
+    await env.DB.prepare(`UPDATE relays SET status = 'queued', pending_entry = '' WHERE id = ?`).bind(r.id).run()
+    await queueRelaySide(env, r, 'entry', entryNext)
+  }
+}
+
+/**
+ * A node's address or port changed: the relays landing on it follow (each a
+ * change of its landing host, sent as an edit would send it). One under way
+ * keeps its target until it is edited again.
+ */
+async function retargetNodeRelays(env: Env, n: NodeRow) {
+  const { results } = await env.DB.prepare('SELECT * FROM relays WHERE node_id = ?').bind(n.id).all<RelayRow>()
+  const t = nodeTarget(n)
+  for (const old of results) {
+    const cur = relayTargets(old)
+    if (cur.length === 1 && cur[0].host === t.host && cur[0].port === t.port) continue
+    if (['queued', 'deleting', 'deleted'].includes(old.status) || ['queued', 'deleting', 'deleted'].includes(old.exit_status)) continue
+    await env.DB.prepare(`UPDATE relays SET targets = ?, remote_host = ?, remote_port = ?, remote_server_id = ?, strategy = '',
+                                 last_error = NULL, exit_error = NULL WHERE id = ?`)
+      .bind(JSON.stringify([t]), t.host, t.port, t.server_id, old.id).run()
+    await resendRelay(env, old)
+    await audit(env, 'relay.update', `${old.name}`, `跟随节点 ${n.name} → ${t.host}:${t.port}`)
+  }
+}
 
 /** Remove a relay row once no side of it is left on a server. */
 async function relayGoneIfDone(env: Env, id: number) {
@@ -1396,17 +1463,32 @@ app.get('/sub/:token', async (c) => {
   if (!s) return c.text('not found', 404)
   const labels = JSON.parse(s.labels) as string[]
   const { results } = await c.env.DB.prepare(
-    `SELECT n.name, n.labels, n.link_enc, n.outbound_enc, n.clash_enc, n.traffic_used, n.traffic_limit_gb, s.name AS server
+    `SELECT n.id, n.name, n.labels, n.link_enc, n.outbound_enc, n.clash_enc, n.traffic_used, n.traffic_limit_gb, s.name AS server
        FROM nodes n JOIN servers s ON s.id = n.server_id
       WHERE n.status = 'applied' AND n.traffic_paused = 0 ORDER BY s.id, n.id`)
-    .all<{ name: string; labels: string; link_enc: string | null; outbound_enc: string | null; clash_enc: string | null; traffic_used: number; traffic_limit_gb: number; server: string }>()
+    .all<{ id: number; name: string; labels: string; link_enc: string | null; outbound_enc: string | null; clash_enc: string | null; traffic_used: number; traffic_limit_gb: number; server: string }>()
   const chosen = results.filter((n) => !labels.length || (JSON.parse(n.labels) as string[]).some((l) => labels.includes(l)))
-  const nodes: SubNode[] = await Promise.all(chosen.map(async (n) => ({
+  const own: SubNode[] = await Promise.all(chosen.map(async (n) => ({
     server: n.server, name: n.name,
     link: n.link_enc ? await decrypt(c.env.TOKEN_KEY, n.link_enc) : null,
     outbound: n.outbound_enc ? JSON.parse(await decrypt(c.env.TOKEN_KEY, n.outbound_enc)) : null,
     clash: n.clash_enc ? JSON.parse(await decrypt(c.env.TOKEN_KEY, n.clash_enc)) : null,
   })))
+  // each node, then the same node through every relay that publishes it (the
+  // node's labels choose both; its traffic is counted once, at the node)
+  const relayed = await publishedRelays(c.env)
+  const nodes: SubNode[] = []
+  const names = new Set(own.map((n) => `${n.server}-${n.name}`))
+  for (const [i, n] of own.entries()) {
+    nodes.push(n)
+    for (const r of relayed.filter((x) => x.node_id === chosen[i].id)) {
+      // a relay may share a name with a node on its server: the copy gets a number
+      let name = r.name
+      for (let k = 2; names.has(`${r.server}-${name}`); k++) name = `${r.name}-${k}`
+      names.add(`${r.server}-${name}`)
+      nodes.push(nodeVia(n, r.via, r.server, name))
+    }
+  }
   const url = new URL(c.req.url)
   const format = pickFormat(url.searchParams.get('format'), c.req.header('User-Agent') ?? '')
   // the subscription's own template for this format, or the built-in one
@@ -1425,6 +1507,40 @@ app.get('/sub/:token', async (c) => {
     'Subscription-Userinfo': `upload=0; download=${used}; total=${total}`,
     'Cache-Control': 'no-store',
   })
+})
+
+/**
+ * The relays that publish their node: running (a tunnel at both ends), not
+ * paused, asked to, and with an address for clients — the one set, else the
+ * one the entry server's psm-agent last synced from.
+ */
+async function publishedRelays(env: Env): Promise<{ node_id: number; name: string; server: string; via: Via }[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT r.node_id, r.name, r.listen_port, r.entry_host, s.name AS server, s.last_ip
+       FROM relays r JOIN servers s ON s.id = r.server_id
+      WHERE r.node_id IS NOT NULL AND r.in_sub = 1 AND r.paused = '' AND r.status = 'applied'
+        AND (r.mode != 'tunnel' OR r.exit_status = 'applied') ORDER BY r.id`)
+    .all<{ node_id: number; name: string; listen_port: number; entry_host: string; server: string; last_ip: string | null }>()
+  return results.filter((r) => r.entry_host || r.last_ip)
+    .map((r) => ({ node_id: r.node_id, name: r.name, server: r.server, via: { host: r.entry_host || r.last_ip!, port: r.listen_port } }))
+}
+
+// A relay's node as its clients reach it through the relay: the node's link
+// (or Surge line, or wg-quick file) with the entry's address and port.
+app.get('/api/relays/:id/link', async (c) => {
+  const r = await getRelay(c.env, c.req.param('id'))
+  if (!r) return c.json(fail('not_found', 'no such relay'), 404)
+  const n = r.node_id === null ? null : await getNode(c.env, r.node_id)
+  if (!n) return c.json(fail('no_node', '这条中转没有落到面板节点上'), 409)
+  if (!n.link_enc) return c.json(fail('no_link', '节点还没有链接'), 409)
+  const host = r.entry_host || (await getServer(c.env, r.server_id))?.last_ip
+  if (!host) return c.json(fail('no_host', '入口服务器还没连过面板：在中转里填上入口地址'), 409)
+  const link = linkVia(await decrypt(c.env.TOKEN_KEY, n.link_enc), { host, port: r.listen_port })
+  if (!link) return c.json(fail('no_link', '这种链接改不了地址'), 409)
+  // named as the subscription names it (a Surge line or wg-quick file keeps its own)
+  const entry = (await getServer(c.env, r.server_id))?.name ?? ''
+  const content = /^[a-z][a-z0-9+.-]*:\/\//i.test(link) ? renameLink(link, `${entry}-${r.name}`) : link
+  return c.json({ format: linkFormat(n), content, host, port: r.listen_port })
 })
 
 // ── subscription templates ───────────────────────────────────────────────────
@@ -1994,26 +2110,30 @@ async function applyRelayResult(env: Env, t: TaskRow, res: AgentResult, error: s
 }
 
 /**
- * What grows without end, trimmed: finished tasks after 14 days, relay
- * samples after the 7 the charts show, daily traffic after 400 days, the
- * audit log after 180, spent sign-in failures and join tokens. At most once
- * an hour, whichever request gets there first; it runs after the answer is
- * sent (waitUntil), so no sync waits for it.
+ * What grows without end, trimmed: the audit log and finished tasks after 7
+ * days, relay samples after the 7 the charts show, daily traffic after 60
+ * (the 流量 page shows 30), sign-in failures and spent or expired join tokens
+ * after a day. Once a day by the cron trigger (wrangler.jsonc), whether or
+ * not any server syncs; and at most once an hour after a sync, as before (a
+ * panel whose trigger was taken away). After the answer is sent (waitUntil):
+ * no request waits for it.
  */
 let lastHousekeeping = 0
-async function housekeeping(env: Env) {
-  if (Date.now() - lastHousekeeping < 3600_000) return
-  lastHousekeeping = Date.now()
-  const due = await env.DB.prepare(`INSERT INTO settings (key, value) VALUES ('housekeeping_at', datetime('now'))
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value < datetime('now', '-1 hour') RETURNING value`).first()
-  if (!due) return   // another isolate did it within the hour
+async function housekeeping(env: Env, scheduled = false) {
+  if (!scheduled) {
+    if (Date.now() - lastHousekeeping < 3600_000) return
+    lastHousekeeping = Date.now()
+    const due = await env.DB.prepare(`INSERT INTO settings (key, value) VALUES ('housekeeping_at', datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value < datetime('now', '-1 hour') RETURNING value`).first()
+    if (!due) return   // another isolate did it within the hour
+  }
   await env.DB.batch([
-    env.DB.prepare(`DELETE FROM tasks WHERE status IN ('done', 'failed') AND finished_at < datetime('now', '-14 days')`),
+    env.DB.prepare(`DELETE FROM audit WHERE at < datetime('now', '-7 days')`),
+    env.DB.prepare(`DELETE FROM tasks WHERE status IN ('done', 'failed') AND finished_at < datetime('now', '-7 days')`),
     env.DB.prepare(`DELETE FROM relay_samples WHERE at < datetime('now', '-7 days')`),
-    env.DB.prepare(`DELETE FROM traffic_daily WHERE day < date('now', '-400 days')`),
-    env.DB.prepare(`DELETE FROM audit WHERE at < datetime('now', '-180 days')`),
+    env.DB.prepare(`DELETE FROM traffic_daily WHERE day < date('now', '-60 days')`),
     env.DB.prepare(`DELETE FROM login_failures WHERE at < datetime('now', '-1 day')`),
-    env.DB.prepare(`DELETE FROM join_tokens WHERE expires_at < datetime('now', '-1 day')`),
+    env.DB.prepare(`DELETE FROM join_tokens WHERE expires_at < datetime('now', '-1 day') OR used_at < datetime('now', '-1 day')`),
   ])
 }
 
@@ -2150,4 +2270,10 @@ app.get('/api/overview', async (c) => {
 
 app.all('/api/*', (c) => c.json(fail('not_found', 'no such endpoint'), 404))
 
-export default app
+export default {
+  fetch: app.fetch,
+  // the cron trigger (wrangler.jsonc): the daily housekeeping
+  scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(ensureSchema(env.DB).then(() => housekeeping(env, true)).catch((e) => console.error('housekeeping', e)))
+  },
+} satisfies ExportedHandler<Env>

@@ -76,8 +76,9 @@ onMounted(() => {
       <a class="brand" href="#/dashboard"><img class="brand-logo" src="/logo.svg" alt="" data-test="logo"> PSM Panel
         <small v-if="version" data-test="sidebar-version">v{{ version }}</small></a>
       <nav class="nav">
+        <!-- @click: the page already open changes no hash, and the menu (on a phone) must close all the same -->
         <a v-for="p in pages" :key="p.id" :href="`#/${p.id}`" :class="{ active: p.id === current }" :data-test="`nav-${p.id}`"
-           :aria-current="p.id === current ? 'page' : undefined">
+           :aria-current="p.id === current ? 'page' : undefined" @click="menuOpen = false">
           <Icon :name="p.icon" />{{ p.label }}
         </a>
       </nav>
