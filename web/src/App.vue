@@ -15,6 +15,7 @@ const pages = [
   { id: 'relays', label: '中转', icon: 'relays', component: defineAsyncComponent(() => import('./views/Relays.vue')) },
   { id: 'traffic', label: '流量', icon: 'traffic', component: defineAsyncComponent(() => import('./views/Traffic.vue')) },
   { id: 'subscriptions', label: '订阅', icon: 'subscriptions', component: defineAsyncComponent(() => import('./views/Subscriptions.vue')) },
+  { id: 'audit', label: '操作日志', icon: 'log', component: defineAsyncComponent(() => import('./views/Audit.vue')) },
   { id: 'settings', label: '系统设置', icon: 'settings', component: defineAsyncComponent(() => import('./views/Settings.vue')) },
 ]
 const current = ref('dashboard')

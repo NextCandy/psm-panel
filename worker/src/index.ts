@@ -20,7 +20,7 @@ import { findSniCandidates, SNI_ENGINES } from './sni'
 // not exported: every export of a Worker's main module is taken for an entrypoint
 // Shown in 系统设置 as 面板版本; bump it whenever the panel gains something, so
 // that it answers "did my deploy take effect?" — the only marker a user has.
-const PANEL_VERSION = '0.8.1'
+const PANEL_VERSION = '0.8.2'
 
 // The psm-agent release this panel expects its servers to run: the 服务器 page
 // offers an upgrade to every joined server reporting anything else. Bump it
@@ -2052,25 +2052,27 @@ async function storeSniResult(env: Env, t: TaskRow & { result_enc?: string | nul
 // The dashboard in one request: counts and sums, nothing decrypted.
 app.get('/api/overview', async (c) => {
   const db = c.env.DB
-  const [servers, nodes, relays, today, recent, failing] = await db.batch([
+  const [servers, nodes, relays, today, failing, resetDays] = await db.batch([
     db.prepare(`SELECT ${serverStatusSQL(c.env)} AS status, COUNT(*) AS n FROM servers s GROUP BY 1`),
     db.prepare(`SELECT status, COUNT(*) AS n, SUM(traffic_used) AS used, SUM(traffic_paused) AS paused FROM nodes GROUP BY status`),
     db.prepare(`SELECT status, COUNT(*) AS n, SUM(traffic_bytes) AS bytes,
                   SUM(CASE WHEN paused != '' THEN 1 ELSE 0 END) AS paused,
                   SUM(CASE WHEN last_loss_pct > 0 THEN 1 ELSE 0 END) AS lossy FROM relays GROUP BY status`),
     db.prepare(`SELECT day, SUM(bytes) AS bytes FROM traffic_daily WHERE day >= date('now', '-13 days') GROUP BY day ORDER BY day`),
-    db.prepare(`SELECT id, at, actor, action, target, detail FROM audit ORDER BY id DESC LIMIT 8`),
     db.prepare(`SELECT 'node' AS type, n.id, n.name, s.name AS server, n.last_error AS error FROM nodes n JOIN servers s ON s.id = n.server_id
                  WHERE n.status = 'failed' OR (n.last_error IS NOT NULL AND n.status = 'applied')
                 UNION ALL
                 SELECT 'relay', r.id, r.name, s.name, COALESCE(r.last_error, r.exit_error) FROM relays r JOIN servers s ON s.id = r.server_id
                  WHERE r.status = 'failed' OR r.exit_status = 'failed'
                 LIMIT 20`),
+    // the days of the month the nodes' counts start over on (本月 counts from there)
+    db.prepare('SELECT DISTINCT reset_day FROM nodes'),
   ])
   return c.json({
     version: PANEL_VERSION,
     servers: servers.results, nodes: nodes.results, relays: relays.results,
-    daily: today.results, audit: recent.results, problems: failing.results,
+    daily: today.results, problems: failing.results,
+    reset_days: (resetDays.results as { reset_day: number }[]).map((r) => r.reset_day),
   })
 })
 

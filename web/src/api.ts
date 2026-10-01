@@ -110,6 +110,19 @@ export function formatBytes(n: number): string {
   return `${i ? v.toFixed(v < 10 ? 2 : 1) : v} ${units[i]}`
 }
 
+/**
+ * The UTC day this month's counts started on ("2026-10-01"), when every node
+ * resets on the same day of the month; null when they differ or there are no
+ * nodes. (Each server resets at midnight in its own time zone, so the day can
+ * be a few hours off.) The days before it in a chart are last month's.
+ */
+export function cycleStart(resetDays: number[], now = new Date()): string | null {
+  const days = [...new Set(resetDays)]
+  if (days.length !== 1) return null
+  const y = now.getUTCFullYear(), m = now.getUTCMonth()
+  return new Date(Date.UTC(y, now.getUTCDate() >= days[0] ? m : m - 1, days[0])).toISOString().slice(0, 10)
+}
+
 /** D1's "2026-09-15 08:00:00" (UTC) or an ISO time → a Date */
 export function parseTime(t: string | null | undefined): Date | null {
   if (!t) return null

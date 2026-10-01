@@ -1,12 +1,11 @@
 <script setup lang="ts">
-// 仪表盘: what is running, what needs a look, what happened lately — one
-// request (/api/overview), counted in D1, nothing decrypted.
+// 仪表盘: what is running, what needs a look, the traffic — one request
+// (/api/overview), counted in D1, nothing decrypted.
 import { computed, onMounted, ref } from 'vue'
-import { api, ago, errorText, formatBytes, type AuditEntry } from '../api'
+import { api, cycleStart, errorText, formatBytes } from '../api'
 import { usePoll, toast } from '../ui'
 import BarChart from '../components/BarChart.vue'
 import Icon from '../components/Icon.vue'
-import { actionLabel } from '../audit'
 
 type Count = { status: string; n: number }
 type Overview = {
@@ -15,8 +14,8 @@ type Overview = {
   nodes: (Count & { used: number | null; paused: number | null })[]
   relays: (Count & { bytes: number | null; paused: number | null; lossy: number | null })[]
   daily: { day: string; bytes: number }[]
-  audit: AuditEntry[]
   problems: { type: 'node' | 'relay'; id: number; name: string; server: string; error: string | null }[]
+  reset_days: number[]
 }
 const o = ref<Overview | null>(null)
 async function load() {
@@ -41,6 +40,9 @@ const relaysPaused = computed(() => sum(o.value?.relays, (r) => r.paused ?? 0))
 const relaysLossy = computed(() => sum(o.value?.relays, (r) => r.lossy ?? 0))
 const today = computed(() => o.value?.daily.find((d) => d.day === new Date().toISOString().slice(0, 10))?.bytes ?? 0)
 const fortnight = computed(() => (o.value?.daily ?? []).reduce((a, d) => a + d.bytes, 0))
+// 本月 counts from the nodes' reset day: the chart's earlier days are last month's
+const since = computed(() => cycleStart(o.value?.reset_days ?? []))
+const lastMonthShown = computed(() => !!since.value && (o.value?.daily ?? []).some((d) => d.day < since.value! && d.bytes > 0))
 </script>
 
 <template>
@@ -72,14 +74,15 @@ const fortnight = computed(() => (o.value?.daily ?? []).reduce((a, d) => a + d.b
       <a class="card stat link" href="#/traffic">
         <span class="l"><Icon name="traffic" />本月流量</span>
         <span class="n" data-test="dash-month">{{ formatBytes(month) }}</span>
-        <span class="s">今日 {{ formatBytes(today) }}</span>
+        <span class="s" data-test="dash-since">{{ since ? `${since.slice(5)} 起算 · ` : nodesTotal ? '按各节点的重置日 · ' : '' }}今日 {{ formatBytes(today) }}</span>
       </a>
     </div>
 
     <div class="grid-2 section">
       <div class="card">
-        <div class="card-head"><h2>最近 14 天</h2><span class="muted">共 {{ formatBytes(fortnight) }}（按 UTC 日期）</span></div>
-        <BarChart :daily="o.daily" :days="14" test="dash-chart" />
+        <div class="card-head"><h2>最近 14 天</h2>
+          <span class="muted" data-test="dash-chart-note">共 {{ formatBytes(fortnight) }}{{ lastMonthShown ? `，浅色是 ${since!.slice(5)} 清零前的` : '' }}（按 UTC 日期）</span></div>
+        <BarChart :daily="o.daily" :days="14" :since="since" test="dash-chart" />
       </div>
       <div class="card">
         <div class="card-head"><h2>需要处理</h2><span class="muted">{{ o.problems.length ? `${o.problems.length} 项` : '' }}</span></div>
@@ -92,18 +95,6 @@ const fortnight = computed(() => (o.value?.daily ?? []).reduce((a, d) => a + d.b
         </ul>
         <div v-else class="empty"><div class="big">✓</div>一切正常</div>
       </div>
-    </div>
-
-    <div class="card section">
-      <div class="card-head"><h2>最近操作</h2><a class="small" href="#/settings">全部记录</a></div>
-      <ul v-if="o.audit.length" class="list-plain">
-        <li v-for="e in o.audit" :key="e.id">
-          <b>{{ actionLabel(e.action) }}</b><span class="muted">{{ e.target }}</span>
-          <span class="faint small ellipsis">{{ e.detail }}</span>
-          <span class="when" :title="e.at">{{ ago(e.at) }}</span>
-        </li>
-      </ul>
-      <div v-else class="empty">暂无记录。</div>
     </div>
   </template>
 </template>

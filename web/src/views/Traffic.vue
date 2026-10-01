@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { api, errorText, formatBytes, GB, localTime, ago } from '../api'
+import { api, cycleStart, errorText, formatBytes, GB, localTime, ago } from '../api'
 import { confirmAction, toast, usePoll } from '../ui'
 import BarChart from '../components/BarChart.vue'
 import Icon from '../components/Icon.vue'
@@ -55,6 +55,9 @@ const rows = computed(() => {
 const month = computed(() => (data.value?.nodes ?? []).reduce((a, n) => a + n.traffic_used, 0))
 const today = computed(() => data.value?.daily.find((d) => d.day === new Date().toISOString().slice(0, 10))?.bytes ?? 0)
 const paused = computed(() => (data.value?.nodes ?? []).filter((n) => n.traffic_paused).length)
+// 本月 counts from the nodes' reset day: the chart's earlier days are last month's
+const since = computed(() => cycleStart((data.value?.nodes ?? []).map((n) => n.reset_day)))
+const lastMonthShown = computed(() => !!since.value && (data.value?.daily ?? []).some((d) => d.day < since.value! && d.bytes > 0))
 const arrow = (k: Key) => (sortKey.value === k ? (sortDesc.value ? ' ↓' : ' ↑') : '')
 
 async function reset(n: Row) {
@@ -79,13 +82,15 @@ async function reset(n: Row) {
     </div>
   </div>
   <div class="stats section">
-    <div class="card stat"><span class="l">本月总流量</span><span class="n" data-test="traffic-month">{{ formatBytes(month) }}</span></div>
+    <div class="card stat"><span class="l">本月总流量</span><span class="n" data-test="traffic-month">{{ formatBytes(month) }}</span>
+      <span class="s" data-test="traffic-since">{{ since ? `${since.slice(5)} 起算` : data?.nodes.length ? '按各节点的重置日起算' : '' }}</span></div>
     <div class="card stat"><span class="l">今日流量（UTC）</span><span class="n">{{ formatBytes(today) }}</span></div>
     <div class="card stat"><span class="l">超额暂停的节点</span><span class="n" :style="{ color: paused ? 'var(--warn)' : '' }">{{ paused }}</span></div>
   </div>
   <div class="card section">
-    <div class="card-head"><h2>最近 30 天</h2></div>
-    <BarChart :daily="data?.daily ?? []" :days="30" test="traffic-chart" />
+    <div class="card-head"><h2>最近 30 天</h2>
+      <span v-if="lastMonthShown" class="muted" data-test="traffic-chart-note">浅色是 {{ since!.slice(5) }} 清零前的，不计入本月</span></div>
+    <BarChart :daily="data?.daily ?? []" :days="30" :since="since" test="traffic-chart" />
   </div>
   <div class="card">
     <div class="toolbar">

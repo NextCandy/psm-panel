@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { api, errorText, localTime, type AuditEntry } from '../api'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { api, errorText } from '../api'
 import { confirmAction, toast } from '../ui'
-import { actionLabel } from '../audit'
 import SecretText from '../components/SecretText.vue'
 import Icon from '../components/Icon.vue'
 
@@ -21,7 +20,7 @@ async function load() {
     toast(errorText(e), 'err')
   }
 }
-onMounted(() => { load(); loadLog(true) })
+onMounted(load)
 
 // ── the panel's address ──────────────────────────────────────────────────────
 const panelUrl = ref('')
@@ -102,28 +101,6 @@ async function signOutEverywhere() {
   await api('/api/logout', { method: 'POST' }).catch(() => undefined)
   window.dispatchEvent(new Event('psm:signed-out'))
 }
-
-// ── the audit log, newest first, a page at a time ────────────────────────────
-const log = ref<AuditEntry[]>([])
-const more = ref(false)
-const category = ref('')
-const PAGE = 30
-async function loadLog(fresh = false) {
-  const before = fresh ? '' : `&before=${log.value[log.value.length - 1]?.id ?? ''}`
-  try {
-    const rows = await api<AuditEntry[]>(`/api/audit?limit=${PAGE}${category.value ? `&action=${category.value}` : ''}${before}`)
-    log.value = fresh ? rows : [...log.value, ...rows]
-    more.value = rows.length === PAGE
-  } catch (e) {
-    toast(errorText(e), 'err')
-  }
-}
-watch(category, () => loadLog(true))
-const categories = [
-  { id: '', label: '全部' }, { id: 'login', label: '登录' }, { id: 'server', label: '服务器' }, { id: 'node', label: '节点' },
-  { id: 'relay', label: '中转' }, { id: 'subscription', label: '订阅' }, { id: 'settings', label: '设置' }, { id: 'template', label: '模板' },
-]
-const actor = (a: string) => (a === 'admin' ? '管理员' : a === 'agent' ? '服务器' : a === 'anonymous' ? '未登录' : a)
 </script>
 
 <template>
@@ -213,30 +190,5 @@ const actor = (a: string) => (a === 'admin' ? '管理员' : a === 'agent' ? '服
       <p class="muted" style="margin: 0 0 12px">登录保持 7 天。退出登录会让所有设备上的登录一起失效；修改 ADMIN_PASSWORD 也一样。</p>
       <button class="btn" type="button" data-test="sign-out-everywhere" @click="signOutEverywhere"><Icon name="logout" />退出所有设备</button>
     </div>
-  </div>
-
-  <div class="card">
-    <div class="card-head">
-      <h2>操作记录</h2>
-      <div class="segmented" style="padding: 2px">
-        <button v-for="c in categories" :key="c.id" type="button" :class="{ on: category === c.id }" style="padding: 4px 10px" @click="category = c.id">{{ c.label }}</button>
-      </div>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>时间</th><th>操作者</th><th>操作</th><th>对象</th><th>详情</th></tr></thead>
-        <tbody>
-          <tr v-for="e in log" :key="e.id" :data-test="`audit-${e.action}`">
-            <td>{{ localTime(e.at) }}</td>
-            <td>{{ actor(e.actor) }}</td>
-            <td>{{ actionLabel(e.action) }}</td>
-            <td>{{ e.target }}</td>
-            <td class="muted" style="white-space: normal; min-width: 240px">{{ e.detail }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <div v-if="!log.length" class="empty">暂无记录。</div>
-    </div>
-    <div v-if="more" class="pager"><button class="btn small" type="button" data-test="audit-more" @click="loadLog()">加载更多</button></div>
   </div>
 </template>
