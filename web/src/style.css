@@ -289,9 +289,10 @@ ul.errors { padding-left: 14px }
 .proto-menu button { width: 100%; display: flex; align-items: center; gap: 10px; border: 0; background: transparent; padding: 8px 10px; border-radius: 7px; cursor: pointer; text-align: left }
 .proto-menu button:hover, .proto-menu button.on { background: var(--hover) }
 
-/* dropdown menu (row actions) */
-.menu-wrap { position: relative; display: inline-block }
-.menu { position: absolute; right: 0; top: calc(100% + 4px); min-width: 170px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 5px; z-index: 30; text-align: left }
+/* dropdown menu (row actions): on <body>, placed by RowMenu next to its button;
+   above the sticky top bar, under dialogs */
+.menu-wrap { display: inline-block }
+.menu { position: fixed; min-width: 170px; max-height: calc(100vh - 16px); overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 5px; z-index: 45; text-align: left }
 .menu button { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; padding: 7px 10px; border-radius: 7px; cursor: pointer; text-align: left; white-space: nowrap }
 .menu button:hover { background: var(--hover) }
 .menu button:disabled { opacity: .45; cursor: default; background: transparent }
