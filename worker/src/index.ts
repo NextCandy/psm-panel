@@ -21,7 +21,7 @@ import { linkVia, nodeVia, type Via } from './relayed'
 // not exported: every export of a Worker's main module is taken for an entrypoint
 // Shown in 系统设置 as 面板版本; bump it whenever the panel gains something, so
 // that it answers "did my deploy take effect?" — the only marker a user has.
-const PANEL_VERSION = '0.10.0'
+const PANEL_VERSION = '0.10.1'
 
 // The psm-agent release this panel expects its servers to run: the 服务器 page
 // offers an upgrade to every joined server reporting anything else. Bump it
@@ -570,6 +570,8 @@ app.post('/api/nodes', async (c) => {
   if (!server) return c.json(fail('bad_server', 'choose a server'), 400)
   const v = validateNode(body)
   if (!v.ok) return c.json(fail('invalid', v.errors.join('；'), { errors: v.errors }), 400)
+  const tooOld = psmTooOld(server, v.data)
+  if (tooOld) return c.json(fail('psm_too_old', tooOld, { errors: [tooOld] }), 409)
   const resetDay = body.reset_day ?? 1
   if (!Number.isInteger(resetDay) || resetDay < 1 || resetDay > 28) return c.json(fail('invalid', '流量重置日：1-28', { errors: ['流量重置日：1-28'] }), 400)
   // on the shared 443 clients reach 443: another public port would be dropped without a word
@@ -646,6 +648,8 @@ app.patch('/api/nodes/:id', async (c) => {
   for (const [k, val] of Object.entries(input.params!)) if (val === MASK) input.params![k] = stored[k]
   const v = validateNode(input)
   if (!v.ok) return c.json(fail('invalid', v.errors.join('；'), { errors: v.errors }), 400)
+  const tooOld = psmTooOld((await getServer(c.env, n.server_id))!, v.data)
+  if (tooOld) return c.json(fail('psm_too_old', tooOld, { errors: [tooOld] }), 409)
   const resetDay = body.reset_day ?? n.reset_day
   if (!Number.isInteger(resetDay) || resetDay < 1 || resetDay > 28) return c.json(fail('invalid', '流量重置日：1-28', { errors: ['流量重置日：1-28'] }), 400)
   const variant = findVariant(n.protocol, n.variant)!
@@ -811,6 +815,18 @@ const publicRelay = (r: RelayRow) => {
   return { ...rest, udp: !!r.udp, tls: !!r.tls, tls_insecure: !!r.tls_insecure, probe: !!r.probe,
     auto_port: !!r.auto_port, exit_auto_port: !!r.exit_auto_port, targets: relayTargets(r), target_health: health,
     exit_pinned: !!cert, in_sub: !!r.in_sub }
+}
+
+// PSM learnt Hysteria2's disable_pmtud on 2026-10-07 (proxy-stack #7). An older
+// PSM keeps the setting and does nothing with it, so a server that reported an
+// older PSM ("2026-10-06 58642cc", psm version) is asked to update first; one
+// that has not joined yet gets the current PSM when it does.
+const PSM_PMTUD = '2026-10-07'
+function psmTooOld(s: ServerRow, data: Record<string, unknown>): string | null {
+  if (data.disable_pmtud !== true) return null
+  const d = /^(\d{4}-\d{2}-\d{2})\b/.exec(s.psm_version ?? '')?.[1]
+  if (!d || d >= PSM_PMTUD) return null
+  return `${s.name} 上的 PSM 是 ${d} 的版本，还不认识「关闭 MTU 探测」：先在服务器页的 ⋯ 里点「升级 agent」（会先更新 PSM），再保存`
 }
 
 /** "1.2.3" at least "1.2.0"? An unknown version is not. */

@@ -21,6 +21,8 @@ export interface Field {
   options?: { value: string; label: string }[]
   /** a select whose value PSM wants as a number (its schema checks the type) */
   numeric?: boolean
+  /** a bool PSM wants as JSON true / false (insecure, the older one, takes 1 / 0) */
+  jsonBool?: boolean
   default?: string | number | boolean
   placeholder?: string
   help?: string
@@ -79,6 +81,7 @@ const uuid: Field = { key: 'uuid', label: 'UUID', type: 'text', placeholder: '�
 
 const ALL_CORES: Engine[] = ['xray', 'sing-box', 'mihomo']
 const SB_MH: Engine[] = ['sing-box', 'mihomo']
+const SB_XR: Engine[] = ['xray', 'sing-box']
 
 export const PROTOCOLS: Protocol[] = [
   {
@@ -126,6 +129,9 @@ export const PROTOCOLS: Protocol[] = [
           { value: 'conservative', label: 'conservative：温和，带宽多人共享或线路拥堵时' },
           { value: 'aggressive', label: 'aggressive：激进，丢包较高的跨境线路' }],
           help: '服务器向客户端发数据时 BBR 的激进程度（不限速时生效）。需要 sing-box 1.14+ 或 mihomo 1.19.24+，服务器上的内核太旧时节点会创建失败并说明原因。' },
+        // QUIC path MTU discovery off (proxy-stack #7): sing-box 1.14+, every Xray with Hysteria2; mihomo has none
+        { key: 'disable_pmtud', label: '关闭 MTU 探测', type: 'bool', default: false, jsonBool: true, engines: SB_XR,
+          help: '关闭 QUIC 的路径 MTU 探测（3x-ui 的 Disable Path MTU Discovery）：服务器不再试探更大的包，一直用较小的包发送，对容易丢大包、网络较差的线路有用。客户端不用改。sing-box 要 1.14+；服务器上的 PSM 要 2026-10-07 之后的版本。' },
       ],
     }],
   },
@@ -347,7 +353,8 @@ export function validateNode(n: NodeInput):
       errors.push(`${f.label}：${f.min}-${f.max}`)
     if (f.type === 'select' && !f.options?.some((o) => o.value === String(val))) errors.push(`${f.label}：无效的选项`)
     if (f.pattern && !new RegExp(f.pattern).test(String(val))) errors.push(`${f.label}：格式不正确`)
-    data[f.key] = f.type === 'number' || f.numeric ? Number(val) : f.type === 'bool' ? (val === true || val === 'true' ? 1 : 0) : val
+    const on = val === true || val === 'true'
+    data[f.key] = f.type === 'number' || f.numeric ? Number(val) : f.type === 'bool' ? (f.jsonBool ? on : on ? 1 : 0) : val
   }
   // a custom exit scope is the geosite list itself (PSM's exit_sites takes names)
   if (data.exit_sites === 'custom') data.exit_sites = data.exit_geosite
